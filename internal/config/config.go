@@ -152,6 +152,9 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(data, &node); err != nil {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
+	if err := rejectAliasesAndMerges(&node); err != nil {
+		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
+	}
 	if err := checkIntegerScalars(&node, reflect.TypeFor[Config]()); err != nil {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
@@ -174,6 +177,24 @@ func Load(path string) (Config, error) {
 	return c, nil
 }
 
+func rejectAliasesAndMerges(node *yaml.Node) error {
+	if node.Kind == yaml.AliasNode {
+		return fmt.Errorf("YAML aliases are unsupported")
+	}
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Tag == "!!merge" || node.Content[i].Value == "<<" {
+				return fmt.Errorf("YAML merge keys are unsupported")
+			}
+		}
+	}
+	for _, child := range node.Content {
+		if err := rejectAliasesAndMerges(child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 func checkIntegerScalars(node *yaml.Node, target reflect.Type) error {
 	if node.Kind == yaml.DocumentNode {
 		if len(node.Content) == 0 {

@@ -172,3 +172,21 @@ func TestZeroBudgetRejected(t *testing.T) {
 		t.Fatal("zero budget accepted")
 	}
 }
+
+func TestLoadRejectsMergeAndAliasSyntax(t *testing.T) {
+	cases := map[string]string{
+		"merge hides fractional counts":    "impact:\n  <<: {max_hops: -0.5, max_candidates: 2.9}\n",
+		"aliased key hides fractional hop": "repo:\n  default_branch: &key max_hops\nimpact:\n  *key: -0.5\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "hazard.yml")
+			if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(p); err == nil {
+				t.Fatal("YAML merge or alias syntax accepted")
+			}
+		})
+	}
+}
