@@ -1,0 +1,61 @@
+version: 1
+repo:
+  default_branch: main
+  full_suite_triggers: ["go.mod", "go.sum", "pyproject.toml", "uv.lock", "Dockerfile*", ".gitlab-ci.yml", ".github/workflows/**", "Makefile", "**/conftest.py", "**/testdata/**"]
+  generated_globs: ["**/*.pb.go", "**/generated.py", "**/*_gen.go"]
+languages:
+  go:
+    enabled: true
+    packages: ["./..."]
+    coverprofile: .hazard/cover.out
+    tags: []
+  python:
+    enabled: true
+    testpaths: ["tests"]
+    coverage_db: .coverage
+    pytest_args: ["-q"]
+impact:
+  max_hops: 3
+  coverage_required: false
+  coverage_max_age_commits: 200
+  max_candidates: 400
+  candidate_ranking: [coverage_overlap, hops, cofailure, recency]
+predictor:
+  kind: ensemble
+  jev:
+    endpoint: https://openrouter.ai/api/alpha/decisions
+    model: typesafe/jev-1.13
+    api_key_env: OPENROUTER_API_KEY
+    questions_per_request: 200
+    max_state_tokens: 12000
+    max_request_tokens: 28000
+    timeout_ms: 3000
+    retries: 2
+    retry_backoff_ms: 200
+    concurrency: 4
+    budget_usd_per_run: 0.01
+  logistic:
+    weights: .hazard/logistic.json
+control:
+  alpha: 0.01
+  delta: 0.05
+  unit: commit
+  require_lock: true
+  lock_mismatch_action: full
+  min_saving_ratio: 0.15
+  drift:
+    window_runs: 500
+    escalate_if_ucb_above_alpha: true
+audit:
+  full_suite_schedule: "0 3 * * *"
+  full_suite_on_merge_to_default: true
+  max_detection_latency_hours: 24
+privacy:
+  redact: structure
+  send_hunk_text: false
+  send_symbol_names: true
+  send_paths: true
+  allow_external_predictor: true
+telemetry:
+  path: .hazard/runs.jsonl
+  enabled: true
