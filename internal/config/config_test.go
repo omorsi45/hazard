@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -59,6 +60,13 @@ func TestLoadPathAndErrors(t *testing.T) {
 	if err != nil || c.Impact.MaxCandidates != 22 {
 		t.Fatalf("root precedence: %+v %v", c, err)
 	}
+	if err := os.Remove("hazard.yml"); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Load("")
+	if err != nil || c.Impact.MaxCandidates != 21 {
+		t.Fatalf("automatic fallback: %+v %v", c, err)
+	}
 	c, err = Load(".hazard/hazard.yml")
 	if err != nil || c.Impact.MaxCandidates != 21 {
 		t.Fatalf("explicit precedence: %+v %v", c, err)
@@ -91,7 +99,7 @@ func TestValidation(t *testing.T) {
 		"bad action":       func(c *Config) { c.Control.LockMismatchAction = "ignore" },
 		"negative hops":    func(c *Config) { c.Impact.MaxHops = -1 },
 		"zero candidates":  func(c *Config) { c.Impact.MaxCandidates = 0 },
-		"zero retries":     func(c *Config) { c.Predictor.Jev.Retries = 0 },
+		"negative retries": func(c *Config) { c.Predictor.Jev.Retries = -1 },
 		"zero concurrency": func(c *Config) { c.Predictor.Jev.Concurrency = 0 },
 		"bad timeout":      func(c *Config) { c.Predictor.Jev.RetryBackoffMS = c.Predictor.Jev.TimeoutMS },
 		"bad endpoint":     func(c *Config) { c.Predictor.Jev.Endpoint = "http://example.com" },
@@ -120,7 +128,47 @@ func TestShippedConfigMatchesDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := Defaults()
-	if c.Version != d.Version || c.Control.Drift.WindowRuns != 500 || c.Predictor.Jev.Endpoint != d.Predictor.Jev.Endpoint {
+	if !reflect.DeepEqual(c, d) {
 		t.Fatalf("shipped config drift: %+v", c)
+	}
+}
+
+func TestLoadRejectsFractionalIntegers(t *testing.T) {
+	cases := map[string]string{
+		"version":       "version: 1.9\n",
+		"candidates":    "impact:\n  max_candidates: 2.9\n",
+		"negative hops": "impact:\n  max_hops: -0.5\n",
+		"retries":       "predictor:\n  jev:\n    retries: 0.5\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "hazard.yml")
+			if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(p); err == nil {
+				t.Fatal("fractional integer accepted")
+			}
+		})
+	}
+}
+
+func TestZeroRetriesAllowedAndZeroBudgetRejected(t *testing.T) {
+	c := Defaults()
+	c.Predictor.Jev.Retries = 0
+	if err := c.Validate(); err != nil {
+		t.Fatalf("zero retries rejected: %v", err)
+	}
+	c.Predictor.Jev.BudgetUSDPerRun = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("zero budget accepted")
+	}
+}
+
+func TestZeroBudgetRejected(t *testing.T) {
+	c := Defaults()
+	c.Predictor.Jev.BudgetUSDPerRun = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("zero budget accepted")
 	}
 }
