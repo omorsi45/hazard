@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -109,5 +110,62 @@ func TestRecallOverrideRequiresExplicitConfirmation(t *testing.T) {
 	code, _, _ := invoke(context.Background(), "select", "--recall", "0.9", "--i-know-what-im-doing")
 	if code != 70 {
 		t.Fatalf("confirmed override should reach scaffold leaf: %d", code)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("injected write failure") }
+
+func TestVersionWriterFailureReturnsInternalCode(t *testing.T) {
+	var errOut bytes.Buffer
+	code := Execute(context.Background(), []string{"version"}, failingWriter{}, &errOut)
+	if code != 70 {
+		t.Fatalf("writer failure code=%d, want 70; stderr=%q", code, errOut.String())
+	}
+}
+
+func TestSelectionHelpEffectiveDefaults(t *testing.T) {
+	code, out, errOut := invoke(context.Background(), "select", "--help")
+	if code != 0 || errOut != "" {
+		t.Fatalf("help code=%d err=%q", code, errOut)
+	}
+	for _, phrase := range []string{
+		"merge-base with the default branch",
+		"working tree, including uncommitted changes",
+		"hazard.yml, then .hazard/hazard.yml",
+		"from lock",
+		"from config",
+		"print the full suite as the run set",
+	} {
+		if !strings.Contains(out, phrase) {
+			t.Errorf("help omitted %q", phrase)
+		}
+	}
+}
+
+func TestJSONUsageErrorsIndependentOfFlagOrder(t *testing.T) {
+	for _, args := range [][]string{
+		{"select", "--unknown", "--json"},
+		{"--json", "bogus"},
+		{"select", "--budget-ms", "bad", "--json"},
+	} {
+		code, out, errOut := invoke(context.Background(), args...)
+		var payload struct {
+			Error string `json:"error"`
+			Code  int    `json:"code"`
+		}
+		if err := json.Unmarshal([]byte(errOut), &payload); err != nil || code != 2 || out != "" || payload.Code != 2 || payload.Error == "" {
+			t.Errorf("%v: code=%d stdout=%q stderr=%q parse=%v", args, code, out, errOut, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"select", "--format", "--json", "--unknown"},
+		{"run", "--", "--json"},
+	} {
+		_, _, errOut := invoke(context.Background(), args...)
+		if strings.HasPrefix(errOut, "{") {
+			t.Errorf("%v incorrectly requested JSON: %q", args, errOut)
+		}
 	}
 }

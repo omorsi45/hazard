@@ -7,6 +7,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
+	"strings"
+
+	"github.com/spf13/pflag"
 
 	"github.com/spf13/cobra"
 )
@@ -15,9 +19,15 @@ const version = "0.1.0-dev"
 
 var errNotImplemented = errors.New("not implemented")
 
+type usageError struct{ cause error }
+
+func (e usageError) Error() string { return e.cause.Error() }
+func (e usageError) Unwrap() error { return e.cause }
+
 // NewRoot returns the command tree. Milestone-specific leaves are explicit stubs.
 func NewRoot() *cobra.Command {
 	root := &cobra.Command{Use: "hazard", Short: "Conservative test selection", SilenceUsage: true, SilenceErrors: true, Version: version}
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err} })
 	root.PersistentFlags().Bool("json", false, "emit machine-readable output")
 	root.PersistentFlags().CountP("verbose", "v", "increase human output verbosity")
 
@@ -30,7 +40,7 @@ func NewRoot() *cobra.Command {
 						recall, _ := cmd.Flags().GetFloat64("recall")
 						confirmed, _ := cmd.Flags().GetBool("i-know-what-im-doing")
 						if !confirmed || math.IsNaN(recall) || math.IsInf(recall, 0) || recall <= 0 || recall >= 1 {
-							return fmt.Errorf("invalid --recall override: requires --i-know-what-im-doing and a value in (0,1)")
+							return usageError{fmt.Errorf("invalid --recall override: requires --i-know-what-im-doing and a value in (0,1)")}
 						}
 					}
 				}
@@ -127,27 +137,72 @@ func NewRoot() *cobra.Command {
 
 func selectFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
-	f.String("base", "", "base ref")
-	f.String("head", "", "head ref")
-	f.String("config", "", "config path")
+	f.String("base", "", "base ref (default: merge-base with the default branch)")
+	f.String("head", "", "head ref (default: working tree, including uncommitted changes)")
+	f.String("config", "", "config path (default: hazard.yml, then .hazard/hazard.yml)")
 	f.String("lock", "hazard.lock", "lock path")
-	f.String("predictor", "", "static|logistic|jev|ensemble")
+	f.String("predictor", "", "static|logistic|jev|ensemble (default: from lock)")
 	f.Float64("recall", 0, "override target recall")
 	f.Bool("i-know-what-im-doing", false, "confirm recall override")
 	f.Int("max-candidates", 400, "residual candidate budget")
 	f.Int("budget-ms", 5000, "selection time budget")
 	f.Float64("budget-usd", 0.01, "predictor spend budget")
-	f.String("redact", "", "none|structure|hash")
-	f.Bool("shadow", false, "emit selection but run full suite")
+	f.String("redact", "", "none|structure|hash (default: from config)")
+	f.Bool("shadow", false, "print the full suite as the run set")
 	f.Bool("dry-run-payload", false, "print predictor payload without sending")
 	f.String("format", "text", "text|json|go-run|pytest-file")
 	f.String("out", "", "selection output path")
 	f.Bool("explain", false, "include per-test reasons")
 }
 
+func jsonRequested(args []string, root *cobra.Command) bool {
+	valueFlags := map[string]bool{}
+	var visit func(*cobra.Command)
+	visit = func(cmd *cobra.Command) {
+		collect := func(flag *pflag.Flag) {
+			if flag.NoOptDefVal == "" {
+				valueFlags[flag.Name] = true
+			}
+		}
+		cmd.Flags().VisitAll(collect)
+		cmd.PersistentFlags().VisitAll(collect)
+		for _, child := range cmd.Commands() {
+			visit(child)
+		}
+	}
+	visit(root)
+	requested := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if arg == "--json" {
+			requested = true
+			continue
+		}
+		if strings.HasPrefix(arg, "--json=") {
+			value := strings.TrimPrefix(arg, "--json=")
+			parsed, err := strconv.ParseBool(value)
+			requested = err != nil || parsed
+			continue
+		}
+		if !strings.HasPrefix(arg, "--") {
+			continue
+		}
+		name, _, hasValue := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
+		if !hasValue && valueFlags[name] {
+			i++
+		}
+	}
+	return requested
+}
+
 // Execute maps command, usage and internal errors to stable process exit codes.
 func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	root := NewRoot()
+	jsonMode := jsonRequested(args, root)
+	_, _, findErr := root.Find(args)
 	root.SetArgs(args)
 	root.SetOut(out)
 	root.SetErr(errOut)
@@ -155,11 +210,11 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	if err == nil {
 		return 0
 	}
-	code := 2
-	if errors.Is(err, errNotImplemented) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		code = 70
+	code := 70
+	var usage usageError
+	if errors.As(err, &usage) || findErr != nil {
+		code = 2
 	}
-	jsonMode, _ := root.PersistentFlags().GetBool("json")
 	if jsonMode {
 		_ = json.NewEncoder(errOut).Encode(map[string]any{"error": err.Error(), "code": code})
 	} else {
