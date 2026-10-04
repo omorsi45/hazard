@@ -1,11 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"math"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -142,13 +144,22 @@ func Load(path string) (Config, error) {
 			return Defaults(), nil
 		}
 	}
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("open config %s: %w", path, err)
 	}
-	defer f.Close()
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
+	}
+	if err := rejectAliasesAndMerges(&node); err != nil {
+		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
+	}
+	if err := checkIntegerScalars(&node, reflect.TypeFor[Config]()); err != nil {
+		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
+	}
 	c := Defaults()
-	decoder := yaml.NewDecoder(f)
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&c); err != nil {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
@@ -166,12 +177,58 @@ func Load(path string) (Config, error) {
 	return c, nil
 }
 
+func rejectAliasesAndMerges(node *yaml.Node) error {
+	if node.Kind == yaml.AliasNode {
+		return fmt.Errorf("YAML aliases are unsupported")
+	}
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Tag == "!!merge" || node.Content[i].Value == "<<" {
+				return fmt.Errorf("YAML merge keys are unsupported")
+			}
+		}
+	}
+	for _, child := range node.Content {
+		if err := rejectAliasesAndMerges(child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func checkIntegerScalars(node *yaml.Node, target reflect.Type) error {
+	if node.Kind == yaml.DocumentNode {
+		if len(node.Content) == 0 {
+			return nil
+		}
+		return checkIntegerScalars(node.Content[0], target)
+	}
+	if target.Kind() == reflect.Int {
+		if node.Kind != yaml.ScalarNode || node.Tag != "!!int" {
+			return fmt.Errorf("expected integer, got %q", node.Value)
+		}
+		return nil
+	}
+	if target.Kind() != reflect.Struct || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		for j := 0; j < target.NumField(); j++ {
+			field := target.Field(j)
+			if field.Tag.Get("yaml") == node.Content[i].Value {
+				if err := checkIntegerScalars(node.Content[i+1], field.Type); err != nil {
+					return fmt.Errorf("%s: %w", field.Tag.Get("yaml"), err)
+				}
+				break
+			}
+		}
+	}
+	return nil
+}
 func (c Config) Validate() error {
 	invalid := func(field string) error { return fmt.Errorf("invalid %s", field) }
 	positive := func(n int) bool { return n > 0 }
 	finite := func(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 	probability := func(v float64) bool { return finite(v) && v > 0 && v < 1 }
-	nonnegative := func(v float64) bool { return finite(v) && v >= 0 }
 	oneOf := func(v string, options ...string) bool {
 		for _, option := range options {
 			if v == option {
@@ -219,10 +276,10 @@ func (c Config) Validate() error {
 	if j.Model == "" || j.APIKeyEnv == "" || c.Predictor.Logistic.Weights == "" {
 		return invalid("predictor identity")
 	}
-	if !positive(j.QuestionsPerRequest) || !positive(j.MaxStateTokens) || !positive(j.MaxRequestTokens) || !positive(j.TimeoutMS) || !positive(j.Retries) || !positive(j.RetryBackoffMS) || !positive(j.Concurrency) || j.RetryBackoffMS >= j.TimeoutMS {
+	if !positive(j.QuestionsPerRequest) || !positive(j.MaxStateTokens) || !positive(j.MaxRequestTokens) || !positive(j.TimeoutMS) || j.Retries < 0 || !positive(j.RetryBackoffMS) || !positive(j.Concurrency) || j.RetryBackoffMS >= j.TimeoutMS {
 		return invalid("predictor.jev limits")
 	}
-	if !nonnegative(j.BudgetUSDPerRun) {
+	if !finite(j.BudgetUSDPerRun) || j.BudgetUSDPerRun <= 0 {
 		return invalid("predictor.jev.budget_usd_per_run")
 	}
 	if !probability(c.Control.Alpha) || !probability(c.Control.Delta) {
