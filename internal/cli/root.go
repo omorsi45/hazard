@@ -155,22 +155,15 @@ func selectFlags(cmd *cobra.Command) {
 	f.Bool("explain", false, "include per-test reasons")
 }
 
-func jsonRequested(args []string, root *cobra.Command) bool {
+func jsonRequested(args []string, cmd *cobra.Command) bool {
 	valueFlags := map[string]bool{}
-	var visit func(*cobra.Command)
-	visit = func(cmd *cobra.Command) {
-		collect := func(flag *pflag.Flag) {
-			if flag.NoOptDefVal == "" {
-				valueFlags[flag.Name] = true
-			}
-		}
-		cmd.Flags().VisitAll(collect)
-		cmd.PersistentFlags().VisitAll(collect)
-		for _, child := range cmd.Commands() {
-			visit(child)
+	collect := func(flag *pflag.Flag) {
+		if flag.NoOptDefVal == "" {
+			valueFlags[flag.Name] = true
 		}
 	}
-	visit(root)
+	cmd.LocalFlags().VisitAll(collect)
+	cmd.InheritedFlags().VisitAll(collect)
 	requested := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -201,8 +194,8 @@ func jsonRequested(args []string, root *cobra.Command) bool {
 // Execute maps command, usage and internal errors to stable process exit codes.
 func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	root := NewRoot()
-	jsonMode := jsonRequested(args, root)
-	_, _, findErr := root.Find(args)
+	cmd, _, findErr := root.Find(args)
+	jsonMode := jsonRequested(args, cmd)
 	root.SetArgs(args)
 	root.SetOut(out)
 	root.SetErr(errOut)

@@ -147,6 +147,7 @@ func TestSelectionHelpEffectiveDefaults(t *testing.T) {
 func TestJSONUsageErrorsIndependentOfFlagOrder(t *testing.T) {
 	for _, args := range [][]string{
 		{"select", "--unknown", "--json"},
+		{"select", "--runner", "--json"},
 		{"--json", "bogus"},
 		{"select", "--budget-ms", "bad", "--json"},
 	} {
@@ -161,6 +162,7 @@ func TestJSONUsageErrorsIndependentOfFlagOrder(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"select", "--format", "--json", "--unknown"},
+		{"run", "--runner", "--json", "--unknown"},
 		{"run", "--", "--json"},
 	} {
 		_, _, errOut := invoke(context.Background(), args...)
