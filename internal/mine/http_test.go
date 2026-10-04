@@ -161,6 +161,24 @@ func TestHTTPPagination(t *testing.T) {
 	}
 }
 
+func TestHTTPEmptyNextLink(t *testing.T) {
+	for _, tc := range []struct{ name, provider, xNext string }{
+		{"github", "github", ""},
+		{"gitlab", "gitlab", ""},
+		{"gitlab-fallback", "gitlab", "2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := mustHTTPClient(t, nil, "https://example.com", tc.provider)
+			headers := http.Header{"Link": {`<>; rel="next"`}}
+			if tc.xNext != "" {
+				headers.Set("X-Next-Page", tc.xNext)
+			}
+			_, err := client.nextPage("https://example.com/runs?page=1", headers)
+			assertHTTPError(t, err, "invalid_pagination", 0, 0)
+		})
+	}
+}
+
 func TestHTTPStatusReasonsAndBoundedRetries(t *testing.T) {
 	for _, tc := range []struct {
 		status, attempts int
@@ -492,6 +510,10 @@ func TestHTTPGitHubRateLimitScheduling(t *testing.T) {
 		{"403-long-reset", "0", "0", "long", "rate_limited", 403, 1, false},
 		{"403-missing-reset", "0", "0", "", "rate_limited", 403, 1, false},
 		{"403-invalid-reset", "0", "0", "invalid", "rate_limited", 403, 1, false},
+		{"403-overflow-reset", "0", "0", "9223372036854775807", "rate_limited", 403, 1, false},
+		{"429-overflow-reset", "0", "0", "9223372036854775807", "rate_limited", 429, 1, false},
+		{"403-out-of-range-reset", "0", "0", "9223372036854775808", "rate_limited", 403, 1, false},
+		{"403-past-reset", "", "0", "1", "", 403, 2, false},
 		{"429-missing-scheduling", "", "", "", "rate_limited", 429, 1, false},
 		{"429-both-deadlines", "0", "0", "short", "", 429, 2, true},
 	} {

@@ -137,7 +137,7 @@ func (c *httpClient) nextPage(current string, headers http.Header) (string, erro
 			}
 			for _, rel := range strings.Fields(params["rel"]) {
 				if rel == "next" {
-					if next != "" {
+					if target == "" || next != "" {
 						return "", invalid
 					}
 					next = target
@@ -276,7 +276,7 @@ func (c *httpClient) rateWait(headers http.Header) (time.Duration, bool) {
 	}
 	if c.provider == "github" && headers.Get("X-RateLimit-Remaining") == "0" {
 		seconds, err := strconv.ParseInt(headers.Get("X-RateLimit-Reset"), 10, 64)
-		if err != nil || seconds < 0 {
+		if err != nil || seconds < 0 || seconds > time.Now().Add(httpMaxRetryWait).Unix() {
 			return 0, false
 		}
 		resetDelay := time.Until(time.Unix(seconds, 0))
