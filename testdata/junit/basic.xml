@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="suite" time="99">
+  <properties><property name="environment" value="linux"/></properties>
+  <testcase name="TestPass" classname="example.com/project/pkg" file="pkg_test.go">
+    <properties><property name="case-key" value="case-value"/></properties>
+  </testcase>
+  <testcase name="TestFail" time="1.2346">
+    <failure type="AssertionError" message="assertion failed">expected 1, got 2</failure>
+  </testcase>
+  <testcase name="TestMixed" time="0">
+    <failure type="AssertionError" message="failure message">failure body</failure>
+    <error type="RuntimeError" message="error message">error body</error>
+    <skipped message="skip reason"/>
+  </testcase>
+</testsuite>
