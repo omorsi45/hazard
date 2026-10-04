@@ -1,8 +1,13 @@
 package store
 
 import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"testing/fstest"
 )
@@ -13,7 +18,7 @@ func TestOpenCreatesConfiguredDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	closeOnCleanup(t, store)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +76,7 @@ func TestReopenPreservesDataAndMigrationCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer again.Close()
+	closeOnCleanup(t, again)
 	var rows, versions int
 	if err := again.DB().QueryRow("SELECT count(*) FROM tests").Scan(&rows); err != nil {
 		t.Fatal(err)
@@ -92,7 +97,7 @@ func TestMigrationFailureRollsBackTablesAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	closeOnCleanup(t, s)
 	bad := "CREATE TABLE should_rollback (id INTEGER); INSERT INTO nonexistent (id) VALUES (1);"
 	if err := applyMigration(s.DB(), 2, bad); err == nil {
 		t.Fatal("bad migration succeeded")
@@ -117,7 +122,7 @@ func TestResultIdentityPreservesMatrixJobsAndRejectsReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	closeOnCleanup(t, s)
 	insert := "INSERT INTO test_results(source, project, commit_sha, test_id, status, pipeline_id, job_id, environment_id, artifact_id, observed_at, artifact_path, raw_name, raw_classname, raw_message, infra_reason) VALUES(?, ?, 'sha', 'go:p:T', 'pass', 'pipeline', ?, ?, 'junit', '2026-09-29T00:00:00Z', 'raw/junit.xml', 'TestT', 'pkg.Suite', 'failure text', 'runner error')"
 	for _, pair := range [][2]string{{"linux", "go126"}, {"windows", "go126"}, {"linux", "go125"}} {
 		if _, err := s.DB().Exec(insert, "github", "owner/repo", pair[0], pair[1]); err != nil {
@@ -157,7 +162,7 @@ func TestInvalidEnumValuesAreRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	closeOnCleanup(t, s)
 	statements := []string{
 		"INSERT INTO tests(id,lang,package,name,file,first_seen,last_seen) VALUES('x','ruby','p','T','f','now','now')",
 		"INSERT INTO test_results(commit_sha,test_id,status,observed_at) VALUES('sha','t','unknown','now')",
@@ -203,7 +208,7 @@ func TestNumberedMigrationsApplyInOrderAndRetryFailedVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	closeOnCleanup(t, s)
 	scripts := fstest.MapFS{
 		"migrations/0002_extra.sql": &fstest.MapFile{Data: []byte("CREATE TABLE extra (id INTEGER);")},
 		"migrations/0003_bad.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE partial (id INTEGER); INSERT INTO no_table VALUES (1);")},
@@ -237,4 +242,88 @@ func TestNumberedMigrationsApplyInOrderAndRetryFailedVersion(t *testing.T) {
 	if count != 3 {
 		t.Fatalf("migration versions = %d, want 3", count)
 	}
+}
+
+func TestReplacementConnectionPreservesPragmas(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "hazard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	conn, err := s.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Raw(func(any) error { return driver.ErrBadConn }); !errors.Is(err, driver.ErrBadConn) {
+		t.Fatalf("retire connection: %v", err)
+	}
+	if err := conn.Close(); err != nil && !errors.Is(err, sql.ErrConnDone) {
+		t.Fatal(err)
+	}
+
+	var foreignKeys, busyTimeout int
+	var mode string
+	if err := s.DB().QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if foreignKeys != 1 || busyTimeout != 5000 || mode != "wal" {
+		t.Fatalf("replacement pragmas: foreign_keys=%d busy_timeout=%d journal_mode=%s", foreignKeys, busyTimeout, mode)
+	}
+}
+
+func TestOpenPreservesSpecialFilename(t *testing.T) {
+	name := "store # é % &.sqlite"
+	if runtime.GOOS != "windows" {
+		name = "store ? # é % &.sqlite"
+	}
+	path := filepath.Join(t.TempDir(), name)
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec("PRAGMA user_version=7"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("database missing at requested path: %v", err)
+	}
+	again, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := again.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	var version int
+	if err := again.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 7 {
+		t.Fatalf("reopened user_version=%d, want 7", version)
+	}
+}
+
+func closeOnCleanup(t *testing.T, s *Store) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
 }

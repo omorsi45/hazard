@@ -3,8 +3,10 @@ package store
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -19,23 +21,34 @@ var migrations embed.FS
 
 type Store struct{ db *sql.DB }
 
-func Open(file string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+func Open(file string) (result *Store, err error) {
+	absolute, err := filepath.Abs(file)
+	if err != nil {
+		return nil, fmt.Errorf("resolve database path: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(absolute), 0755); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
-	db, err := sql.Open("sqlite", file)
+	uriPath := filepath.ToSlash(absolute)
+	if filepath.VolumeName(absolute) != "" && !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	uri := url.URL{Scheme: "file", Path: uriPath}
+	uri.RawQuery = url.Values{"_pragma": {"busy_timeout(5000)", "foreign_keys(ON)"}}.Encode()
+	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000", "PRAGMA foreign_keys=ON"} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("configure database: %w", err)
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, db.Close())
 		}
+	}()
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		return nil, fmt.Errorf("configure database: %w", err)
 	}
 	if err := migrate(db, migrations); err != nil {
-		db.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
 	return &Store{db: db}, nil
@@ -67,7 +80,11 @@ func applyMigration(db *sql.DB, version int, schema string) (err error) {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("rollback migration: %w", rollbackErr))
+		}
+	}()
 	if _, err := tx.Exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"); err != nil {
 		return err
 	}
