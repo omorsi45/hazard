@@ -15,7 +15,11 @@ func TestParseJUnitStatusAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	t.Cleanup(func() {
+		if err := f.Close(); err != nil {
+			t.Errorf("close JUnit fixture: %v", err)
+		}
+	})
 	cases, err := ParseJUnit(f)
 	if err != nil {
 		t.Fatal(err)
@@ -111,6 +115,63 @@ func TestParseJUnitSuiteCompleteness(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseJUnitCaselessIncompleteReport(t *testing.T) {
+	for name, report := range map[string]string{
+		"root suite error":         `<testsuite errors="1"><error message="fixture-secret-collection-error"/></testsuite>`,
+		"nested empty suite error": `<testsuites><testsuite><error message="fixture-secret-collection-error"/></testsuite></testsuites>`,
+		"declared count mismatch":  `<testsuite tests="1"/>`,
+		"container count mismatch": `<testsuites tests="1"><testsuite/></testsuites>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cases, err := ParseJUnit(strings.NewReader(report))
+			if err == nil || cases != nil {
+				t.Fatalf("caseless incomplete report returned success: cases=%+v error=%v", cases, err)
+			}
+			if len(err.Error()) > 256 || strings.Contains(err.Error(), "fixture-secret") {
+				t.Fatal("caseless incomplete error copied unbounded report diagnostics")
+			}
+		})
+	}
+	for _, report := range []string{
+		`<testsuite/>`, `<testsuites/>`,
+		`<testsuite tests="0" errors="0" failures="0" skipped="0"/>`,
+		`<testsuites><testsuite tests="0"/></testsuites>`,
+	} {
+		cases, err := ParseJUnit(strings.NewReader(report))
+		if err != nil || len(cases) != 0 {
+			t.Fatalf("complete empty report rejected: cases=%+v error=%v", cases, err)
+		}
+	}
+}
+
+func TestParseJUnitSuiteDepthLimit(t *testing.T) {
+	for _, element := range []string{"testsuite", "testsuites"} {
+		for _, depth := range []int{256, 257} {
+			t.Run(fmt.Sprintf("%s/%d", element, depth), func(t *testing.T) {
+				open, close := "<"+element+">", "</"+element+">"
+				body, wantCases := "", 0
+				if element == "testsuite" {
+					body, wantCases = `<testcase name="n"/>`, 1
+				}
+				cases, err := ParseJUnit(strings.NewReader(strings.Repeat(open, depth) + body + strings.Repeat(close, depth)))
+				if depth == 256 && (err != nil || len(cases) != wantCases) {
+					t.Fatalf("supported 256 suite/container boundary rejected: count=%d error=%v", len(cases), err)
+				}
+				if depth == 257 && (err == nil || cases != nil) {
+					t.Fatalf("suite/container depth limit allowed 257 frames: count=%d error=%v", len(cases), err)
+				}
+			})
+		}
+	}
+	t.Run("combined frames and no partial cases", func(t *testing.T) {
+		report := `<testsuites><testsuite><testcase name="first"/>` + strings.Repeat("<testsuites>", 255) + strings.Repeat("</testsuites>", 255) + `</testsuite></testsuites>`
+		cases, err := ParseJUnit(strings.NewReader(report))
+		if err == nil || cases != nil {
+			t.Fatalf("combined suite/container depth returned partial success: count=%d error=%v", len(cases), err)
+		}
+	})
 }
 
 func TestParseJUnitInvalidInput(t *testing.T) {

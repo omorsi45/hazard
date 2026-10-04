@@ -20,6 +20,8 @@ type JUnitCase struct {
 	DiagnosticsTruncated                 bool
 }
 
+const maxJUnitSuiteDepth = 256
+
 // ParseJUnit reads a JUnit report without inferring missing observations.
 func ParseJUnit(r io.Reader) ([]JUnitCase, error) {
 	limited := &io.LimitedReader{R: r, N: (32 << 20) + 1}
@@ -30,6 +32,7 @@ func ParseJUnit(r io.Reader) ([]JUnitCase, error) {
 	var diagnostic *junitDiagnostic
 	var elements []string
 	rootSeen := false
+	reportIncomplete := false
 	propertyEntries := 0
 	for {
 		token, err := d.Token()
@@ -39,6 +42,9 @@ func ParseJUnit(r io.Reader) ([]JUnitCase, error) {
 		if err == io.EOF {
 			if !rootSeen || len(elements) != 0 {
 				return nil, fmt.Errorf("missing or incomplete JUnit root")
+			}
+			if len(cases) == 0 && reportIncomplete {
+				return nil, fmt.Errorf("incomplete JUnit report contains no testcases")
 			}
 			return cases, nil
 		}
@@ -67,6 +73,9 @@ func ParseJUnit(r io.Reader) ([]JUnitCase, error) {
 			case "testsuite", "testsuites":
 				if parent != "" && parent != "testsuite" && parent != "testsuites" {
 					return nil, fmt.Errorf("JUnit suite outside suite container")
+				}
+				if len(suites) >= maxJUnitSuiteDepth {
+					return nil, fmt.Errorf("JUnit report exceeds 256 nested suite/container frames")
 				}
 				name, _ := junitAttribute(token, "name")
 				suite := junitSuite{name: name, start: len(cases), properties: map[string]string{}, expected: map[string]int{}}
@@ -166,6 +175,7 @@ func ParseJUnit(r io.Reader) ([]JUnitCase, error) {
 						suite.incomplete = true
 					}
 				}
+				reportIncomplete = reportIncomplete || suite.incomplete
 				for i := suite.start; i < len(cases); i++ {
 					cases[i].SuiteIncomplete = cases[i].SuiteIncomplete || suite.incomplete
 					for k, v := range suite.properties {
