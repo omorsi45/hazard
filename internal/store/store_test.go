@@ -87,8 +87,8 @@ func TestReopenPreservesDataAndMigrationCount(t *testing.T) {
 	if err := again.DB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 1 {
-		t.Fatalf("migration rows = %d, want 1", versions)
+	if versions != 2 {
+		t.Fatalf("migration rows = %d, want 2", versions)
 	}
 }
 
@@ -99,7 +99,7 @@ func TestMigrationFailureRollsBackTablesAndVersion(t *testing.T) {
 	}
 	closeOnCleanup(t, s)
 	bad := "CREATE TABLE should_rollback (id INTEGER); INSERT INTO nonexistent (id) VALUES (1);"
-	if err := applyMigration(s.DB(), 2, bad); err == nil {
+	if err := applyMigration(s.DB(), 3, bad); err == nil {
 		t.Fatal("bad migration succeeded")
 	}
 	var count int
@@ -109,11 +109,11 @@ func TestMigrationFailureRollsBackTablesAndVersion(t *testing.T) {
 	if count != 0 {
 		t.Fatal("failed migration left a table")
 	}
-	if err := s.DB().QueryRow("SELECT count(*) FROM schema_migrations WHERE version=2").Scan(&count); err != nil {
+	if err := s.DB().QueryRow("SELECT count(*) FROM schema_migrations WHERE version=3").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
-		t.Fatal("failed migration recorded version 2")
+		t.Fatal("failed migration recorded version 3")
 	}
 }
 
@@ -210,26 +210,26 @@ func TestNumberedMigrationsApplyInOrderAndRetryFailedVersion(t *testing.T) {
 	}
 	closeOnCleanup(t, s)
 	scripts := fstest.MapFS{
-		"migrations/0002_extra.sql": &fstest.MapFile{Data: []byte("CREATE TABLE extra (id INTEGER);")},
-		"migrations/0003_bad.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE partial (id INTEGER); INSERT INTO no_table VALUES (1);")},
+		"migrations/0003_extra.sql": &fstest.MapFile{Data: []byte("CREATE TABLE extra (id INTEGER);")},
+		"migrations/0004_bad.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE partial (id INTEGER); INSERT INTO no_table VALUES (1);")},
 	}
 	if err := migrate(s.DB(), scripts); err == nil {
-		t.Fatal("bad third migration succeeded")
+		t.Fatal("bad fourth migration succeeded")
 	}
 	var count int
 	if err := s.DB().QueryRow("SELECT count(*) FROM sqlite_master WHERE name='extra'").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {
-		t.Fatal("second migration did not apply")
+		t.Fatal("third migration did not apply")
 	}
 	if err := s.DB().QueryRow("SELECT count(*) FROM sqlite_master WHERE name='partial'").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
-		t.Fatal("third migration partially applied")
+		t.Fatal("fourth migration partially applied")
 	}
-	scripts["migrations/0003_bad.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE recovered (id INTEGER);")}
+	scripts["migrations/0004_bad.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE recovered (id INTEGER);")}
 	if err := migrate(s.DB(), scripts); err != nil {
 		t.Fatal(err)
 	}
@@ -239,8 +239,8 @@ func TestNumberedMigrationsApplyInOrderAndRetryFailedVersion(t *testing.T) {
 	if err := s.DB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 3 {
-		t.Fatalf("migration versions = %d, want 3", count)
+	if count != 4 {
+		t.Fatalf("migration versions = %d, want 4", count)
 	}
 }
 
