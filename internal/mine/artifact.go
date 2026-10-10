@@ -53,7 +53,7 @@ func decodeArtifact(r io.Reader, formatHint, glob string, limits artifactLimits)
 	if glob == "" {
 		glob = "**/junit*.xml"
 	}
-	if !artifactValidPath(glob) || strings.HasPrefix(glob, `\`) {
+	if !artifactValidPath(glob) {
 		return nil, fmt.Errorf("invalid artifact glob path")
 	}
 	pattern := strings.Split(glob, "/")

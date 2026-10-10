@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"path"
 	"reflect"
 	"strings"
 	"testing"
@@ -98,6 +99,34 @@ func TestArtifactGlobSegments(t *testing.T) {
 		if err != nil || len(entries) != 0 {
 			t.Fatalf("unmatched %s = %#v, %v; want no entries", format, entries, err)
 		}
+	}
+}
+
+func TestArtifactLeadingGlobEscape(t *testing.T) {
+	for _, tt := range []struct {
+		format, name, glob string
+	}{
+		{"zip", "[report].xml", `\[report\].xml`},
+		{"xml", "junit.xml", `\junit.xml`},
+		{"gzip", "junit.xml", `\junit.xml`},
+	} {
+		t.Run(tt.format, func(t *testing.T) {
+			matched, err := path.Match(tt.glob, tt.name)
+			if err != nil || !matched {
+				t.Fatalf("invalid path.Match regression fixture: matched=%v err=%v", matched, err)
+			}
+			raw := []byte(artifactXML)
+			switch tt.format {
+			case "zip":
+				raw = artifactZIP(t, artifactMember{name: tt.name, body: artifactXML})
+			case "gzip":
+				raw = artifactGzip(t, raw)
+			}
+			entries, err := DecodeArtifact(bytes.NewReader(raw), tt.format, tt.glob)
+			if err != nil || len(entries) != 1 || entries[0].Name != tt.name {
+				t.Fatalf("valid leading glob escape rejected: entry count=%d err=%v", len(entries), err)
+			}
+		})
 	}
 }
 
