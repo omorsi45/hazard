@@ -321,6 +321,109 @@ func TestPersistCommitMetadataDeferralAndParents(t *testing.T) {
 	}
 }
 
+// Suppressing an existing commit's projection update must lose verified replay
+// metadata; replacing all columns would instead corrupt existing legacy facts.
+func TestPersistReplayEnrichesCommitProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name, rawParents, legacyParent, kinds string
+		parents                               []string
+		classification                        map[string]int
+	}{
+		{"single_populated", `["parent-a"]`, "parent-a", `{"source":2}`, []string{"parent-a"}, map[string]int{"source": 2}},
+		{"single_empty", `["parent-a"]`, "parent-a", `{}`, []string{"parent-a"}, map[string]int{}},
+		{"root", `[]`, "", `{"source":2}`, []string{}, map[string]int{"source": 2}},
+		{"merge", `["parent-a","parent-b"]`, "", `{"source":2}`, []string{"parent-a", "parent-b"}, map[string]int{"source": 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := persistDB(t)
+			unknown := persistFixture()
+			unknown.Commit.ParentSHAs, unknown.Commit.Kinds = nil, nil
+			persistOK(t, db, unknown)
+			// Replay may fill only parent/kinds; preserve an existing legacy row's
+			// other metadata even when it differs from the acquisition projection.
+			if _, err := db.Exec(`UPDATE commits SET authored_at='2026-09-30T00:00:00Z',branch='preserved',files_changed=7,lines_added=8,lines_removed=9`); err != nil {
+				t.Fatal(err)
+			}
+			verified := persistFixture()
+			verified.Commit.ParentSHAs, verified.Commit.Kinds = tc.parents, tc.classification
+			verified.ObservedAt = verified.ObservedAt.Add(24 * time.Hour)
+			for _, replay := range []ProviderObservation{verified, unknown} {
+				persistOK(t, db, replay)
+				var parent sql.NullString
+				var kinds, authored, branch string
+				var files, added, removed int
+				if err := db.QueryRow(`SELECT parent_sha,kinds,authored_at,branch,files_changed,lines_added,lines_removed FROM commits`).Scan(&parent, &kinds, &authored, &branch, &files, &added, &removed); err != nil {
+					t.Fatal(err)
+				}
+				if parent.Valid != (tc.legacyParent != "") || parent.String != tc.legacyParent {
+					t.Errorf("legacy parent projection did not retain verified enrichment: %+v", parent)
+				}
+				if kinds != tc.kinds {
+					t.Errorf("legacy kinds projection did not retain verified enrichment: %s", kinds)
+				}
+				if authored != "2026-09-30T00:00:00Z" || branch != "preserved" || files != 7 || added != 8 || removed != 9 {
+					t.Error("projection enrichment overwrote unrelated legacy commit metadata")
+				}
+				var parents, rawKinds, artifactTime, rawTime, resultTime string
+				if err := db.QueryRow(`SELECT tested_parent_shas_json,tested_kinds_json,observed_at FROM ci_artifacts`).Scan(&parents, &rawKinds, &artifactTime); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.QueryRow(`SELECT observed_at FROM ci_observations`).Scan(&rawTime); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.QueryRow(`SELECT observed_at FROM test_results`).Scan(&resultTime); err != nil {
+					t.Fatal(err)
+				}
+				if parents != tc.rawParents || rawKinds != tc.kinds || artifactTime != "2026-10-01T13:00:00.000000000Z" || rawTime != artifactTime || resultTime != artifactTime {
+					t.Error("commit replay lost raw metadata or original source observation time")
+				}
+				for _, table := range []string{"ci_artifacts", "ci_observations", "test_results", "commits"} {
+					persistCount(t, db, table, 1)
+				}
+			}
+		})
+	}
+}
+
+func TestPersistCommitEnrichmentHonorsKnownEnvelopeMetadata(t *testing.T) {
+	for _, tc := range []struct{ name, parents, kinds string }{
+		{"root_empty_kinds", `[]`, `{}`},
+		{"merge_populated_kinds", `["parent-a","parent-b"]`, `{"source":1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := persistDB(t)
+			prior := persistFixture()
+			prior.Commit.ParentSHAs, prior.Commit.Kinds = nil, nil
+			persistOK(t, db, prior)
+			// Reproduce the pre-fix stale projection: retained verified envelope
+			// facts are known, but commits still has SQL NULL / JSON null.
+			if _, err := db.Exec(`UPDATE ci_artifacts SET tested_parent_shas_json=?,tested_kinds_json=?`, tc.parents, tc.kinds); err != nil {
+				t.Fatal(err)
+			}
+			other := persistFixture()
+			other.UnitKey, other.ArtifactID, other.JobID = "artifact-2", persistPtr("artifact-2"), persistPtr("job-2")
+			other.Commit.ParentSHAs = []string{"parent-a"}
+			persistOK(t, db, other)
+			var parent sql.NullString
+			var kinds, parents, rawKinds string
+			if err := db.QueryRow(`SELECT parent_sha,kinds FROM commits`).Scan(&parent, &kinds); err != nil {
+				t.Fatal(err)
+			}
+			if parent.Valid || kinds != "null" {
+				t.Error("projection enrichment contradicted retained known envelope metadata")
+			}
+			if err := db.QueryRow(`SELECT tested_parent_shas_json,tested_kinds_json FROM ci_artifacts WHERE unit_key='artifact-1'`).Scan(&parents, &rawKinds); err != nil {
+				t.Fatal(err)
+			}
+			if parents != tc.parents || rawKinds != tc.kinds {
+				t.Error("projection enrichment replaced retained root/merge/classification facts")
+			}
+			persistCount(t, db, "ci_observations", 2)
+			persistCount(t, db, "test_results", 2)
+		})
+	}
+}
+
 func TestPersistReplayAndMatrixAttempts(t *testing.T) {
 	db := persistDB(t)
 	obs := persistFixture()
@@ -572,7 +675,7 @@ func TestPersistReplayEnrichesUnknownFacts(t *testing.T) {
 }
 
 func TestPersistReplayRejectsContradictoryKnownFacts(t *testing.T) {
-	for _, field := range []string{"tested_sha", "job", "attempt", "artifact", "environment", "test_id", "raw_status"} {
+	for _, field := range []string{"tested_sha", "job", "attempt", "artifact", "environment", "test_id", "raw_status", "commit_parents", "commit_kinds"} {
 		t.Run(field, func(t *testing.T) {
 			db := persistDB(t)
 			obs := persistFixture()
@@ -592,11 +695,18 @@ func TestPersistReplayRejectsContradictoryKnownFacts(t *testing.T) {
 				obs.Entries[0].Cases[0].Identity.ID = "go:other:TestT"
 			case "raw_status":
 				obs.Entries[0].Cases[0].Case.Status = "pass"
+			case "commit_parents":
+				obs.Commit.ParentSHAs = []string{"different-parent"}
+			case "commit_kinds":
+				obs.Commit.Kinds = map[string]int{}
 			}
 			err := persistObservation(context.Background(), db, obs)
 			var conflict *AcquisitionConflictError
 			if !errors.As(err, &conflict) || conflict.Reason == "" {
 				t.Fatal("contradictory replay did not return a recognizable safe conflict reason")
+			}
+			if (field == "commit_parents" || field == "commit_kinds") && conflict.Reason != field {
+				t.Fatal("contradictory commit metadata lost its typed conflict reason")
 			}
 			persistCount(t, db, "ci_observations", 1)
 			persistCount(t, db, "test_results", 1)

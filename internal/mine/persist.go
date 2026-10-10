@@ -424,7 +424,16 @@ func persistCommit(ctx context.Context, tx *sql.Tx, obs ProviderObservation, obs
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO commits(sha,parent_sha,authored_at,branch,files_changed,lines_added,lines_removed,kinds) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(sha) DO NOTHING`, obs.TestedSHA, parent, nullableTime(c.AuthoredAt), obs.Branch, c.FilesChanged, c.LinesAdded, c.LinesRemoved, string(kinds))
+	// Legacy NULL parent also represents verified roots/merges. Fill only
+	// unknown projections that agree with every retained known envelope.
+	_, err = tx.ExecContext(ctx, `INSERT INTO commits(sha,parent_sha,authored_at,branch,files_changed,lines_added,lines_removed,kinds) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(sha) DO UPDATE SET
+		parent_sha=CASE WHEN commits.parent_sha IS NULL AND excluded.parent_sha IS NOT NULL AND NOT EXISTS (
+			SELECT 1 FROM ci_artifacts WHERE tested_sha=excluded.sha AND tested_parent_shas_json IS NOT NULL
+			AND tested_parent_shas_json!=json_array(excluded.parent_sha)) THEN excluded.parent_sha ELSE commits.parent_sha END,
+		kinds=CASE WHEN commits.kinds='null' AND NOT EXISTS (
+			SELECT 1 FROM ci_artifacts WHERE tested_sha=excluded.sha AND tested_kinds_json!='null'
+			AND tested_kinds_json!=excluded.kinds) THEN excluded.kinds ELSE commits.kinds END`,
+		obs.TestedSHA, parent, nullableTime(c.AuthoredAt), obs.Branch, c.FilesChanged, c.LinesAdded, c.LinesRemoved, string(kinds))
 	return err
 }
 
