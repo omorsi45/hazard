@@ -56,7 +56,7 @@ func gitLabReject(t *testing.T, trace string, c gitlabProvenanceContext) {
 }
 
 func TestGitLabProvenanceSuccess(t *testing.T) {
-	for _, variant := range []string{"success", "ordinary_failure", "ansi", "field_order", "opaque_stdout", "heading", "runtime"} {
+	for _, variant := range []string{"success", "ordinary_failure", "ansi", "field_order", "opaque_stdout", "heading", "runtime", "count_spacing"} {
 		t.Run(variant, func(t *testing.T) {
 			trace, c := gitLabFixtureTrace(), gitLabFixtureContext()
 			switch variant {
@@ -68,6 +68,8 @@ func TestGitLabProvenanceSuccess(t *testing.T) {
 				trace = "\x1b[0K" + strings.ReplaceAll(trace, "section_start:", "\x1b[0Ksection_start:")
 				trace = strings.Replace(trace, "$ git rev-parse HEAD", "\x1b[32;1m$ git rev-parse HEAD\x1b[0;m", 1)
 				trace = strings.Replace(trace, "Job succeeded", "\x1b[32;1mJob succeeded\x1b[0;m", 1)
+			case "count_spacing":
+				trace = strings.Replace(trace, "reports/result.xml: found 1 matching", "reports/result.xml:  found  1 matching", 1)
 			case "field_order":
 				trace = strings.Replace(trace, "id=42 status=201 token=fixture-secret", "token=fixture-secret   status=201\tid=42", 1)
 			case "opaque_stdout":
@@ -365,5 +367,16 @@ func TestGitLabProvenanceUploadSingleLine(t *testing.T) {
 			trace := strings.Replace(gitLabFixtureTrace(), "token=fixture-secret", "token=fixture-secret"+extra, 1)
 			gitLabReject(t, trace, gitLabFixtureContext())
 		})
+	}
+}
+
+func TestGitLabProvenanceExtraCountSpacing(t *testing.T) {
+	base := gitLabFixtureTrace()
+	const extra = " other.xml:  found 1 matching artifact files and directories"
+	for name, trace := range map[string]string{
+		"heading":       strings.Replace(base, "Uploading artifacts for successful job", "Uploading artifacts for successful job"+extra, 1),
+		"upload_status": strings.Replace(base, "token=fixture-secret", "token=fixture-secret"+extra, 1),
+	} {
+		t.Run(name, func(t *testing.T) { gitLabReject(t, trace, gitLabFixtureContext()) })
 	}
 }

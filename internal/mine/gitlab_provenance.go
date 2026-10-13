@@ -99,7 +99,7 @@ func verifyGitLabProvenance(trace []byte, c gitlabProvenanceContext) (gitlabProv
 		}
 		if marker != nil {
 			// Human headings are not evidence and may not hide another operation.
-			if strings.Contains(line, "$") || strings.Contains(line, ": found ") ||
+			if strings.Contains(line, "$") || strings.Contains(strings.Join(strings.Fields(line), " "), ": found ") ||
 				strings.Contains(line, "Uploading artifacts...") || strings.Contains(line, "Uploading artifacts as ") {
 				return reject("trace_framing")
 			}
@@ -355,7 +355,7 @@ func gitLabUploadSucceeded(line string, jobID int64) bool {
 	}
 	idSeen, statusSeen := false, false
 	tail := strings.TrimPrefix(line, prefix)
-	if strings.Contains(tail, "Uploading artifacts") || strings.Contains(tail, ": found ") {
+	if strings.Contains(tail, "Uploading artifacts") || strings.Contains(strings.Join(strings.Fields(tail), " "), ": found ") {
 		return false
 	}
 	for _, field := range strings.Fields(tail) {
