@@ -144,6 +144,12 @@ func persistObservation(ctx context.Context, db *sql.DB, obs ProviderObservation
 	if _, err := tx.ExecContext(ctx, "UPDATE ci_artifacts SET replay_cases=replay_cases+? WHERE provider=? AND project=? AND unit_key=? AND content_sha256=?", replays, obs.Provider, obs.Project, obs.UnitKey, obs.ContentSHA256); err != nil {
 		return err
 	}
+	var conflicted bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM acquisition_gaps
+		WHERE provider=? AND project=? AND unit_key=? AND reason='acquisition_conflict' AND resolved_at IS NULL)`,
+		obs.Provider, obs.Project, obs.UnitKey).Scan(&conflicted); err != nil {
+		return err
+	}
 	// Preflight all entries together, including earlier acquisition envelopes.
 	for encoded, candidate := range candidates {
 		var count int
@@ -162,6 +168,9 @@ func persistObservation(ctx context.Context, db *sql.DB, obs ProviderObservation
 			continue
 		}
 		if count != 1 {
+			continue
+		}
+		if conflicted {
 			continue
 		}
 		if err := persistCommit(ctx, tx, obs, candidate.observed); err != nil {

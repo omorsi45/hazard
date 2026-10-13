@@ -42,7 +42,7 @@ func TestMiningMigrationUpgradesExistingStoreAndReopens(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range []string{"mining_sources", "mining_runs", "ci_artifacts", "ci_observations", "acquisition_exclusions"} {
+		for _, name := range []string{"mining_sources", "mining_runs", "ci_artifacts", "ci_observations", "acquisition_exclusions", "acquisition_gaps"} {
 			var count int
 			if err := s.DB().QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", name).Scan(&count); err != nil {
 				t.Fatal(err)
@@ -58,8 +58,8 @@ func TestMiningMigrationUpgradesExistingStoreAndReopens(t *testing.T) {
 		if err := s.DB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&versions); err != nil {
 			t.Fatal(err)
 		}
-		if tests != 1 || versions != 2 {
-			t.Errorf("preserved tests/migrations = %d/%d, want 1/2", tests, versions)
+		if tests != 1 || versions != 3 {
+			t.Errorf("preserved tests/migrations = %d/%d, want 1/3", tests, versions)
 		}
 		if err := s.Close(); err != nil {
 			t.Fatal(err)
@@ -768,5 +768,238 @@ func TestPersistArtifactDoesNotCertifyRunCompletion(t *testing.T) {
 	}
 	if state != "incomplete" {
 		t.Fatal("new artifact left an unchecked run checkpoint complete")
+	}
+}
+
+func TestMiningMigrationAcquisitionGapEpisodes(t *testing.T) {
+	db := persistDB(t)
+	insert := `INSERT INTO acquisition_gaps(provider,project,unit_key,reason,first_acquired_at,last_acquired_at,content_sha256,raw_blob_path)
+		VALUES('github','owner/repo','artifact-1','artifact_expired','2026-10-13T14:00:00Z','2026-10-13T15:00:00Z',?,?)`
+	first, err := db.Exec(insert, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := first.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(insert, nil, nil); err == nil {
+		t.Fatal("duplicate active unknown-content episode accepted")
+	}
+	for _, hash := range []string{strings.Repeat("a", 64), strings.Repeat("b", 64)} {
+		if _, err := db.Exec(insert, hash, ".hazard/raw/"+hash); err != nil {
+			t.Fatalf("different known content was merged: %v", err)
+		}
+	}
+	if _, err := db.Exec(insert, strings.Repeat("a", 64), ".hazard/raw/a"); err == nil {
+		t.Fatal("duplicate active known-content episode accepted")
+	}
+	if _, err := db.Exec("UPDATE acquisition_gaps SET resolved_at='2026-10-13T16:00:00Z' WHERE id=?", id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(insert, nil, nil); err != nil {
+		t.Fatalf("resolved history prevented a recurrent active episode: %v", err)
+	}
+	persistCount(t, db, "acquisition_gaps", 4)
+	var run, detail, firstAt, lastAt, resolved string
+	var sourceTime, hash, path, job, artifact sql.NullString
+	var attempt sql.NullInt64
+	if err := db.QueryRow(`SELECT run_id,detail,source_time,content_sha256,raw_blob_path,job_id,artifact_id,attempt,
+		first_acquired_at,last_acquired_at,resolved_at FROM acquisition_gaps WHERE id=?`, id).Scan(
+		&run, &detail, &sourceTime, &hash, &path, &job, &artifact, &attempt, &firstAt, &lastAt, &resolved); err != nil {
+		t.Fatal(err)
+	}
+	if run != "" || detail != "" || sourceTime.Valid || hash.Valid || path.Valid || job.Valid || artifact.Valid || attempt.Valid ||
+		firstAt != "2026-10-13T14:00:00Z" || lastAt != "2026-10-13T15:00:00Z" || resolved != "2026-10-13T16:00:00Z" {
+		t.Fatal("gap recovery erased history or invented source/content/execution facts")
+	}
+	for _, table := range []string{"mining_sources", "ci_artifacts", "ci_observations", "test_results"} {
+		persistCount(t, db, table, 0)
+	}
+}
+
+func TestMiningMigrationAcquisitionGapConstraints(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider                       string
+		attempt, hash, path, firstAt, lastAt any
+	}{
+		{"provider", "other", nil, nil, nil, "local", "local"},
+		{"attempt_zero", "github", 0, nil, nil, "local", "local"},
+		{"attempt_negative", "github", -1, nil, nil, "local", "local"},
+		{"missing_first_clock", "github", nil, nil, nil, nil, "local"},
+		{"missing_last_clock", "github", nil, nil, nil, "local", nil},
+		{"hash_without_path", "github", nil, strings.Repeat("a", 64), nil, "local", "local"},
+		{"path_without_hash", "github", nil, nil, ".hazard/raw/a", "local", "local"},
+		{"empty_hash", "github", nil, "", ".hazard/raw/a", "local", "local"},
+		{"short_hash", "github", nil, strings.Repeat("a", 63), ".hazard/raw/a", "local", "local"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := persistDB(t)
+			if _, err := db.Exec(`INSERT INTO acquisition_gaps(provider,project,unit_key,reason,attempt,content_sha256,raw_blob_path,first_acquired_at,last_acquired_at)
+				VALUES(?,'owner/repo','unit','download_failed',?,?,?,?,?)`, tc.provider, tc.attempt, tc.hash, tc.path, tc.firstAt, tc.lastAt); err == nil {
+				t.Fatal("invalid gap source/content/local-clock facts accepted")
+			}
+			persistCount(t, db, "acquisition_gaps", 0)
+		})
+	}
+}
+
+func persistConflictFixture(t *testing.T, db *sql.DB, unit string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO acquisition_gaps(provider,project,unit_key,reason,first_acquired_at,last_acquired_at)
+		VALUES('github','owner/repo',?,'acquisition_conflict','2026-10-13T14:00:00Z','2026-10-13T14:00:00Z')`, unit); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func persistConflictRaw(t *testing.T, db *sql.DB, wantReplays int) {
+	t.Helper()
+	persistCount(t, db, "ci_artifacts", 1)
+	persistCount(t, db, "ci_observations", 1)
+	var key sql.NullString
+	var rawTime, artifactTime, status, message, properties, identity, sha, job string
+	var replays int
+	if err := db.QueryRow(`SELECT o.result_key,o.observed_at,a.observed_at,o.status,o.raw_message,o.raw_properties_json,o.test_id,a.tested_sha,a.job_id,a.replay_cases
+		FROM ci_observations o JOIN ci_artifacts a USING(provider,project,unit_key,content_sha256)`).Scan(
+		&key, &rawTime, &artifactTime, &status, &message, &properties, &identity, &sha, &job, &replays); err != nil {
+		t.Fatal(err)
+	}
+	if !key.Valid || rawTime != "2026-10-01T13:00:00.000000000Z" || artifactTime != rawTime || status != "fail" || message != "assertion failed" ||
+		properties != `{"runner":"go"}` || identity != "go:example.org/p:TestT" || sha != "tested-merge" || job != "job-1" || replays != wantReplays {
+		t.Fatal("conflicted capture lost raw facts, known identity/provenance, result key, source time or replay count")
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(key.String), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["Source"] != "github" || decoded["Project"] != "owner/repo" || decoded["SHA"] != "tested-merge" || decoded["TestID"] != "go:example.org/p:TestT" {
+		t.Fatal("conflicted raw capture discarded its factual result-key reference")
+	}
+}
+
+func TestPersistActiveAcquisitionConflictGate(t *testing.T) {
+	for _, tc := range []struct {
+		name, update string
+		want         int
+	}{
+		{"active_unknown_content", "", 0},
+		{"active_other_run_content", "run_id='other-run',content_sha256='" + strings.Repeat("c", 64) + "',raw_blob_path='.hazard/raw/c',job_id='other-job',artifact_id='other-artifact',attempt=2,source_time='2026-10-01T12:00:00Z'", 0},
+		{"resolved", "resolved_at='2026-10-13T15:00:00Z'", 1},
+		{"other_unit", "unit_key='other-unit'", 1},
+		{"other_project", "project='other/repo'", 1},
+		{"other_provider", "provider='gitlab'", 1},
+		{"non_conflict_reason", "reason='artifact_expired'", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := persistDB(t)
+			persistConflictFixture(t, db, "artifact-1")
+			if tc.update != "" {
+				if _, err := db.Exec("UPDATE acquisition_gaps SET " + tc.update); err != nil {
+					t.Fatal(err)
+				}
+			}
+			persistOK(t, db, persistFixture())
+			persistConflictRaw(t, db, 0)
+			for _, table := range []string{"commits", "tests", "test_results"} {
+				persistCount(t, db, table, tc.want)
+			}
+			persistCount(t, db, "acquisition_exclusions", 0)
+			persistCount(t, db, "acquisition_gaps", 1)
+			var resolved sql.NullString
+			if err := db.QueryRow("SELECT resolved_at FROM acquisition_gaps").Scan(&resolved); err != nil {
+				t.Fatal(err)
+			}
+			if resolved.Valid != (tc.name == "resolved") {
+				t.Fatal("artifact capture silently resolved an active gap")
+			}
+		})
+	}
+}
+
+func TestPersistConflictGateEnrichedReplayRemainsRaw(t *testing.T) {
+	db := persistDB(t)
+	unknown := persistFixture()
+	unknown.TestedSHA, unknown.TestedRevisionEvidence, unknown.JobID, unknown.ExecutionEvidence, unknown.Attempt = nil, nil, nil, nil, nil
+	unknown.Entries[0].Cases[0].Identity = runner.TestIdentity{}
+	unknown.Entries[0].Cases[0].IdentityError = "identity unavailable"
+	persistOK(t, db, unknown)
+	persistConflictFixture(t, db, "artifact-1")
+	verified := persistFixture()
+	verified.ObservedAt = verified.ObservedAt.Add(24 * time.Hour)
+	verified.Entries[0].Cases[0].IdentityEvidence = "verified tested module"
+	persistOK(t, db, verified)
+	persistOK(t, db, unknown)
+	persistConflictRaw(t, db, 2)
+	for _, table := range []string{"commits", "tests", "test_results"} {
+		persistCount(t, db, table, 0)
+	}
+	var evidence string
+	var resolved sql.NullString
+	if err := db.QueryRow("SELECT identity_evidence FROM ci_observations").Scan(&evidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT resolved_at FROM acquisition_gaps").Scan(&resolved); err != nil {
+		t.Fatal(err)
+	}
+	if evidence != "verified tested module" || resolved.Valid {
+		t.Fatal("conflicted replay lost enrichment or silently resolved its conflict")
+	}
+}
+
+func TestPersistConflictGateStillRejectsContradictions(t *testing.T) {
+	for _, reason := range []string{"known_provenance", "immutable_raw_case"} {
+		t.Run(reason, func(t *testing.T) {
+			db := persistDB(t)
+			obs := persistFixture()
+			persistOK(t, db, obs)
+			persistConflictFixture(t, db, "artifact-1")
+			if reason == "known_provenance" {
+				obs.TestedSHA = persistPtr("different-tested")
+			} else {
+				obs.Entries[0].Cases[0].Case.Status = "pass"
+			}
+			err := persistObservation(context.Background(), db, obs)
+			var conflict *AcquisitionConflictError
+			if !errors.As(err, &conflict) || conflict.Reason != reason {
+				t.Fatal("active gap bypassed known-fact contradiction rejection")
+			}
+			persistConflictRaw(t, db, 0)
+			persistCount(t, db, "test_results", 1)
+		})
+	}
+}
+
+func TestPersistConflictGateRetainsCollisionWithdrawal(t *testing.T) {
+	db := persistDB(t)
+	obs := persistFixture()
+	persistOK(t, db, obs)
+	persistConflictFixture(t, db, "artifact-1")
+	persistCount(t, db, "test_results", 1)
+	obs.ContentSHA256 = strings.Repeat("c", 64)
+	persistOK(t, db, obs)
+	persistCount(t, db, "ci_artifacts", 2)
+	persistCount(t, db, "ci_observations", 2)
+	persistCount(t, db, "test_results", 0)
+	persistCount(t, db, "commits", 1)
+	persistCount(t, db, "tests", 1)
+	var excluded int
+	if err := db.QueryRow("SELECT count(*) FROM acquisition_exclusions WHERE reason='duplicate_test_identity'").Scan(&excluded); err != nil {
+		t.Fatal(err)
+	}
+	if excluded != 2 {
+		t.Fatal("conflict gate hid an ambiguous legacy-key collision")
+	}
+}
+
+func TestPersistConflictGateQueryFailureRollsBack(t *testing.T) {
+	db := persistDB(t)
+	if _, err := db.Exec("DROP TABLE acquisition_gaps"); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistObservation(context.Background(), db, persistFixture()); err == nil {
+		t.Fatal("failed durable conflict lookup permitted an acquisition commit")
+	}
+	for _, table := range []string{"mining_sources", "mining_runs", "ci_artifacts", "ci_observations", "acquisition_exclusions", "commits", "tests", "test_results"} {
+		persistCount(t, db, table, 0)
 	}
 }
