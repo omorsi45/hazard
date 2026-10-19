@@ -18,12 +18,32 @@ type Request struct {
 	Resume                                                                   bool
 }
 
+// Activity counts this request, separately from the stored totals in Stats.
+// InspectedRuns counts joined acquireRun calls; InspectedAttempts counts their
+// valid first-jobs-page ordinals, not discovery or failed-operation evidence.
+// PersistedArtifacts excludes rejected conflicting envelopes. GapsByReason
+// counts accepted valid gap messages, including a message whose storage failed.
+type Activity struct {
+	InspectedRuns      int            `json:"inspected_runs"`
+	InspectedAttempts  int            `json:"inspected_attempts"`
+	PersistedArtifacts int            `json:"persisted_artifacts"`
+	NewRawCases        int            `json:"new_raw_cases"`
+	ReplayCases        int            `json:"replay_cases"`
+	NetFactualResults  int            `json:"net_factual_results"`
+	IncompleteRuns     int            `json:"incomplete_runs"`
+	CappedRuns         int            `json:"capped_runs"`
+	GapsByReason       map[string]int `json:"gaps_by_reason"`
+}
+
 // Stats counts acquisition units and factual records, never regression labels.
 // RawCases and FactualResults are current stored totals; ReplayDuplicates counts
 // repeated raw cases. InspectedAttempts counts only known run attempt ordinals.
 // InspectedArtifacts counts distinct source unit keys; incomplete/capped units
 // count artifact content versions retaining those acquisition states.
 type Stats struct {
+	Activity                    Activity       `json:"activity"`
+	ActiveGaps                  int            `json:"active_gaps"`
+	ResolvedGaps                int            `json:"resolved_gaps"`
 	RequestedSince              time.Time      `json:"requested_since"`
 	RequestedUntil              time.Time      `json:"requested_until"`
 	ObservedSince               *time.Time     `json:"observed_since"`
@@ -53,7 +73,16 @@ func (s Stats) String() string {
 	}
 	fmt.Fprintf(&b, " requested_since=%s requested_until=%s observed_since=%s observed_until=%s",
 		stamp(&s.RequestedSince), stamp(&s.RequestedUntil), stamp(s.ObservedSince), stamp(s.ObservedUntil))
-	reasons := make([]string, 0, len(s.AcquisitionExclusions))
+	fmt.Fprintf(&b, " active_gaps=%d resolved_gaps=%d activity_runs=%d activity_attempts=%d activity_artifacts=%d activity_new_raw_cases=%d activity_replay_cases=%d activity_net_factual_results=%d activity_incomplete_runs=%d activity_capped_runs=%d", s.ActiveGaps, s.ResolvedGaps, s.Activity.InspectedRuns, s.Activity.InspectedAttempts, s.Activity.PersistedArtifacts, s.Activity.NewRawCases, s.Activity.ReplayCases, s.Activity.NetFactualResults, s.Activity.IncompleteRuns, s.Activity.CappedRuns)
+	reasons := make([]string, 0, len(s.Activity.GapsByReason))
+	for reason := range s.Activity.GapsByReason {
+		reasons = append(reasons, reason)
+	}
+	sort.Strings(reasons)
+	for _, reason := range reasons {
+		fmt.Fprintf(&b, " activity_gap_%s=%d", reason, s.Activity.GapsByReason[reason])
+	}
+	reasons = reasons[:0]
 	for reason := range s.AcquisitionExclusions {
 		reasons = append(reasons, reason)
 	}
