@@ -1615,3 +1615,68 @@ func TestGitHubLogExhaustionStopsNextJob(t *testing.T) {
 		t.Fatal("next-job exhaustion did not emit its capped gap")
 	}
 }
+
+func TestGitHubLogGapCallbackStops(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"ordinary", errors.New("fixture gap writer failure")},
+		{"canceled", context.Canceled},
+		{"deadline", context.DeadlineExceeded},
+		{"auth", &httpError{Reason: "auth"}},
+		{"rate_limited", &httpError{Reason: "rate_limited"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &githubAcquireFixture{LogStatus: http.StatusNotFound, TwoArtifacts: true}
+			p := githubAcquireProvider(t, c)
+			gaps, artifacts := 0, 0
+			sink := acquisitionSink{
+				Gap: func(g acquisitionGap) error {
+					gaps++
+					if g.Reason != "log_unavailable" {
+						t.Error("callback fixture did not reach the missing log")
+					}
+					return tc.err
+				},
+				Artifact: func(acquiredArtifact) error { artifacts++; return nil },
+			}
+			ctx := context.Background()
+			outcome, err := p.acquireRun(ctx, githubSourceRun(), sink)
+			if err != tc.err || ctx.Err() != nil || outcome.State != "incomplete" || gaps != 1 || artifacts != 0 || c.ZipCalls != 1 || c.LogCalls != 1 || c.ModuleCalls != 0 || c.CommitCalls != 0 {
+				t.Fatalf("gap callback did not stop immediately: same_error=%t state=%s gaps=%d artifacts=%d zip=%d log=%d module=%d commit=%d", err == tc.err, outcome.State, gaps, artifacts, c.ZipCalls, c.LogCalls, c.ModuleCalls, c.CommitCalls)
+			}
+		})
+	}
+}
+
+func TestGitHubLogSourceFailureRetainsArtifact(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusUnauthorized, http.StatusTooManyRequests} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			c := &githubAcquireFixture{LogStatus: status, TwoArtifacts: true}
+			p := githubAcquireProvider(t, c)
+			var got []acquiredArtifact
+			var gaps []acquisitionGap
+			sink := githubGapSink(&gaps)
+			sink.Artifact = func(a acquiredArtifact) error { got = append(got, a); return nil }
+			outcome, err := p.acquireRun(context.Background(), githubSourceRun(), sink)
+			want := 1
+			if status == http.StatusNotFound {
+				want = 2
+				if err != nil {
+					t.Fatal("ordinary missing log stopped independent artifact acquisition")
+				}
+			} else if !githubFatal(err) {
+				t.Fatal("fatal log source error was not propagated")
+			}
+			if outcome.State != "incomplete" || len(got) != want || len(gaps) != want || c.ZipCalls != want || c.LogCalls != want || c.ModuleCalls != 0 || c.CommitCalls != 0 {
+				t.Fatal("source log failure lost acquired evidence or continued after a fatal source error")
+			}
+			for _, a := range got {
+				if !bytes.Equal(a.Raw, c.Raw) || a.Observation.Entries[0].Cases[0].Case.Status != "fail" || a.Observation.TestedSHA != nil {
+					t.Fatal("source log failure changed actual raw bytes, case status or unknown provenance")
+				}
+			}
+		})
+	}
+}

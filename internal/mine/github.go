@@ -497,9 +497,10 @@ func (p *githubProvider) acquireRun(ctx context.Context, run sourceRun, sink acq
 		observation := ProviderObservation{Provider: "github", Project: p.request.Project, RunID: run.ID, UnitKey: gap.UnitKey, ArtifactID: &artifactID, ContentSHA256: hash, SourceHeadSHA: run.SourceHeadSHA, Branch: run.Branch, ObservedAt: artifact.CreatedAt.UTC(), RunCreatedAt: run.CreatedAt, RunAttempt: run.RunAttempt, RequestedSince: &p.request.Since, RequestedUntil: &p.request.Until, State: "complete"}
 		if !logsLoaded && len(entries) > 0 {
 			logsLoaded = true
-			logs, logErr = p.loadLogs(ctx, run, jobs, sink, &outcome)
-			if logErr != nil && !githubFatal(logErr) {
-				return outcome, logErr
+			var callbackErr error
+			logs, logErr, callbackErr = p.loadLogs(ctx, run, jobs, sink, &outcome)
+			if callbackErr != nil {
+				return outcome, callbackErr
 			}
 		}
 		if err := ctx.Err(); err != nil {
@@ -644,7 +645,7 @@ type githubLog struct {
 	Raw []byte
 }
 
-func (p *githubProvider) loadLogs(ctx context.Context, run sourceRun, jobs []githubJob, sink acquisitionSink, outcome *runOutcome) ([]githubLog, error) {
+func (p *githubProvider) loadLogs(ctx context.Context, run sourceRun, jobs []githubJob, sink acquisitionSink, outcome *runOutcome) ([]githubLog, error, error) {
 	var logs []githubLog
 	remaining := int64(64 << 20)
 	for _, job := range jobs {
@@ -654,7 +655,7 @@ func (p *githubProvider) loadLogs(ctx context.Context, run sourceRun, jobs []git
 		if job.Status != "completed" {
 			gap.Reason = "job_incomplete"
 			if err := githubGap(sink, outcome, gap); err != nil {
-				return logs, err
+				return logs, nil, err
 			}
 			continue
 		}
@@ -665,19 +666,19 @@ func (p *githubProvider) loadLogs(ctx context.Context, run sourceRun, jobs []git
 			if errors.As(fetchErr, &failure) && failure.Reason == "budget_exhausted" {
 				gap.Reason = "acquisition_capped"
 				gap.Detail = "run_log_budget"
-				return logs, githubGap(sink, outcome, gap)
+				return logs, nil, githubGap(sink, outcome, gap)
 			}
 			if err := githubGap(sink, outcome, gap); err != nil {
-				return logs, err
+				return logs, nil, err
 			}
 			if githubFatal(fetchErr) {
-				return logs, fetchErr
+				return logs, fetchErr, nil
 			}
 			continue
 		}
 		logs = append(logs, githubLog{Job: job, Raw: raw})
 	}
-	return logs, nil
+	return logs, nil, nil
 }
 
 func (p *githubProvider) readTestedModule(ctx context.Context, sha string) (string, error) {
