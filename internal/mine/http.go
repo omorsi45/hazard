@@ -77,7 +77,7 @@ func newHTTPClient(client *http.Client, apiBase, provider, token string) (*httpC
 }
 
 func (c *httpClient) getJSON(ctx context.Context, rawURL string, dst any) (http.Header, error) {
-	result, err := c.fetch(ctx, rawURL, httpJSONLimit, true)
+	result, err := c.fetch(ctx, rawURL, httpJSONLimit, true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func (c *httpClient) getJSON(ctx context.Context, rawURL string, dst any) (http.
 }
 
 func (c *httpClient) download(ctx context.Context, rawURL string, maxBytes int64) ([]byte, error) {
-	result, err := c.fetch(ctx, rawURL, maxBytes, false)
+	result, err := c.fetch(ctx, rawURL, maxBytes, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,15 @@ func (c *httpClient) download(ctx context.Context, rawURL string, maxBytes int64
 }
 
 func (c *httpClient) getBytes(ctx context.Context, apiURL string, maxBytes int64) ([]byte, error) {
-	result, err := c.fetch(ctx, apiURL, maxBytes, true)
+	result, err := c.fetch(ctx, apiURL, maxBytes, true, nil)
+	if err != nil {
+		return nil, err
+	}
+	return result.data, nil
+}
+
+func (c *httpClient) getBytesBudgeted(ctx context.Context, apiURL string, maxBytes int64, remaining *int64) ([]byte, error) {
+	result, err := c.fetch(ctx, apiURL, maxBytes, true, remaining)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +186,7 @@ func (c *httpClient) nextPage(current string, headers http.Header) (string, erro
 	return resolved.String(), nil
 }
 
-func (c *httpClient) fetch(ctx context.Context, rawURL string, maxBytes int64, authenticate bool) (*httpResult, error) {
+func (c *httpClient) fetch(ctx context.Context, rawURL string, maxBytes int64, authenticate bool, remaining *int64) (*httpResult, error) {
 	if maxBytes <= 0 || maxBytes == math.MaxInt64 {
 		return nil, &httpError{Reason: "invalid_limit"}
 	}
@@ -194,6 +202,9 @@ func (c *httpClient) fetch(ctx context.Context, rawURL string, maxBytes int64, a
 		return nil, contextHTTPError(err, 0, 0)
 	}
 	for attempt := 1; ; attempt++ {
+		if remaining != nil && *remaining <= 0 {
+			return nil, &httpError{Reason: "budget_exhausted", Attempts: attempt - 1}
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 		if err != nil {
 			return nil, &httpError{Reason: "invalid_url"}
@@ -225,19 +236,32 @@ func (c *httpClient) fetch(ctx context.Context, rawURL string, maxBytes int64, a
 				failure.Reason = "rate_limited"
 			}
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+				readLimit := maxBytes + 1
+				if remaining != nil {
+					readLimit = min(readLimit, *remaining)
+				}
+				data, readErr := io.ReadAll(io.LimitReader(resp.Body, readLimit))
 				_ = resp.Body.Close()
-				if readErr == nil {
-					if int64(len(data)) > maxBytes {
-						return nil, &httpError{Reason: "too_large", StatusCode: resp.StatusCode, Attempts: attempt}
+				if remaining != nil {
+					*remaining -= int64(len(data))
+				}
+				if readErr != nil {
+					if ctx.Err() != nil {
+						return nil, contextHTTPError(ctx.Err(), resp.StatusCode, attempt)
 					}
+					if errors.Is(readErr, context.DeadlineExceeded) || errors.Is(readErr, context.Canceled) {
+						return nil, contextHTTPError(readErr, resp.StatusCode, attempt)
+					}
+				}
+				if readErr == nil && int64(len(data)) > maxBytes {
+					return nil, &httpError{Reason: "too_large", StatusCode: resp.StatusCode, Attempts: attempt}
+				}
+				// Exhaustion cannot establish EOF without another body byte.
+				if remaining != nil && *remaining <= 0 {
+					return nil, &httpError{Reason: "budget_exhausted", StatusCode: resp.StatusCode, Attempts: attempt}
+				}
+				if readErr == nil {
 					return &httpResult{data: data, headers: resp.Header.Clone(), status: resp.StatusCode, attempts: attempt}, nil
-				}
-				if ctx.Err() != nil {
-					return nil, contextHTTPError(ctx.Err(), resp.StatusCode, attempt)
-				}
-				if errors.Is(readErr, context.DeadlineExceeded) || errors.Is(readErr, context.Canceled) {
-					return nil, contextHTTPError(readErr, resp.StatusCode, attempt)
 				}
 				failure.Reason = "network"
 			} else {
@@ -349,6 +373,10 @@ func (c *httpClient) credentials(req *http.Request, authenticate bool) {
 	req.Header.Del("Authorization")
 	req.Header.Del("PRIVATE-TOKEN")
 	req.Header.Del("Cookie")
+	req.Header.Del("X-GitHub-Api-Version")
+	if authenticate && sameOrigin(req.URL, c.origin) && c.provider == "github" {
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	}
 	if authenticate && sameOrigin(req.URL, c.origin) && c.token != "" {
 		if c.provider == "github" {
 			req.Header.Set("Authorization", "Bearer "+c.token)

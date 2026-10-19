@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/cookiejar"
@@ -587,5 +588,201 @@ func assertHTTPError(t *testing.T, err error, reason string, status, attempts in
 		if strings.Contains(fmt.Sprintf("%+v", err), secret) {
 			t.Error("HTTP diagnostic contains a fixture credential")
 		}
+	}
+}
+
+func TestHTTPGitHubAPIVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, mode, want string
+		public                     bool
+	}{
+		{"github_json", "github", "json", "2022-11-28", false},
+		{"github_bytes", "github", "bytes", "2022-11-28", false},
+		{"github_public_json", "github", "json", "2022-11-28", true},
+		{"github_download", "github", "download", "", false},
+		{"gitlab_json", "gitlab", "json", "", false},
+		{"gitlab_bytes", "gitlab", "bytes", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-GitHub-Api-Version") != tc.want {
+					t.Error("API version was missing or outside the GitHub API scope")
+				}
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			defer server.Close()
+			client := mustHTTPClient(t, server.Client(), server.URL, tc.provider)
+			if tc.public {
+				client.token = ""
+			}
+			var err error
+			switch tc.mode {
+			case "json":
+				var result struct{ OK bool }
+				_, err = client.getJSON(context.Background(), server.URL+"/runs", &result)
+			case "bytes":
+				_, err = client.getBytes(context.Background(), server.URL+"/logs", 1024)
+			case "download":
+				_, err = client.download(context.Background(), server.URL+"/archive", 1024)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestHTTPGitHubAPIVersionRedirect(t *testing.T) {
+	for _, authenticate := range []bool{true, false} {
+		name := "api"
+		if !authenticate {
+			name = "anonymous"
+		}
+		t.Run(name, func(t *testing.T) {
+			destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-GitHub-Api-Version") != "" {
+					t.Error("redirected download received the GitHub API version")
+				}
+				_, _ = w.Write([]byte("archive"))
+			}))
+			defer destination.Close()
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				want := ""
+				if authenticate {
+					want = "2022-11-28"
+				}
+				if r.Header.Get("X-GitHub-Api-Version") != want {
+					t.Error("same-origin API version did not preserve request scope")
+				}
+				if r.URL.Path == "/start" {
+					http.Redirect(w, r, "/same", http.StatusFound)
+					return
+				}
+				http.Redirect(w, r, destination.URL+"/archive", http.StatusFound)
+			}))
+			defer api.Close()
+			client := mustHTTPClient(t, api.Client(), api.URL, "github")
+			var err error
+			if authenticate {
+				_, err = client.getBytes(context.Background(), api.URL+"/start", 1024)
+			} else {
+				_, err = client.download(context.Background(), api.URL+"/start", 1024)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestHTTPByteBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name                          string
+		budget, max, bytes, remaining int64
+		calls                         int
+		reason                        string
+	}{
+		{"normal", 10, 4, 3, 7, 1, ""}, {"partial_retry", 10, 4, 5, 5, 2, ""}, {"probe", 10, 3, 4, 6, 1, "too_large"}, {"probe_exhausts", 4, 3, 4, 0, 1, "too_large"}, {"exact", 3, 4, 3, 0, 1, "budget_exhausted"}, {"zero", 0, 4, 0, 0, 0, "budget_exhausted"}, {"retry_exhausted", 2, 4, 2, 0, 1, "budget_exhausted"}, {"truncated", 2, 4, 2, 0, 1, "budget_exhausted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+			defer server.Close()
+			client := mustHTTPClient(t, server.Client(), server.URL, "github")
+			base := client.api.Transport
+			if base == nil {
+				base = http.DefaultTransport
+			}
+			calls := 0
+			var downloaded int64
+			client.api.Transport = httpRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				response, err := base.RoundTrip(r)
+				if err != nil {
+					return response, err
+				}
+				calls++
+				_ = response.Body.Close()
+				size, fail := int64(3), false
+				switch tc.name {
+				case "partial_retry":
+					if calls == 1 {
+						size, fail = 2, true
+					}
+				case "retry_exhausted":
+					size, fail = 2, true
+				case "probe", "probe_exhausts":
+					size = 6
+				}
+				response.Body = io.NopCloser(&githubRetryReadBody{remaining: size, fail: fail, downloaded: &downloaded})
+				return response, nil
+			})
+			remaining := tc.budget
+			data, err := client.getBytesBudgeted(context.Background(), server.URL, tc.max, &remaining)
+			if tc.reason == "" {
+				if err != nil || string(data) != "xxx" {
+					t.Fatal("bounded complete response was lost")
+				}
+			} else {
+				var failure *httpError
+				if !errors.As(err, &failure) || failure.Reason != tc.reason || data != nil {
+					t.Fatal("bounded-out response was accepted or error semantics changed")
+				}
+			}
+			if calls != tc.calls || downloaded != tc.bytes || remaining != tc.remaining {
+				t.Fatalf("body reads were not bounded/debited across retries and probes: calls=%d bytes=%d remaining=%d", calls, downloaded, remaining)
+			}
+		})
+	}
+}
+
+func TestHTTPByteBudgetControls(t *testing.T) {
+	for _, mode := range []string{"unbudgeted", "nil", "cancelled"} {
+		t.Run(mode, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+			defer server.Close()
+			client := mustHTTPClient(t, server.Client(), server.URL, "github")
+			base := client.api.Transport
+			if base == nil {
+				base = http.DefaultTransport
+			}
+			calls := 0
+			var downloaded int64
+			client.api.Transport = httpRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				response, err := base.RoundTrip(r)
+				if err != nil {
+					return response, err
+				}
+				calls++
+				_ = response.Body.Close()
+				size, fail := int64(3), false
+				if calls == 1 {
+					size, fail = 2, true
+				}
+				response.Body = io.NopCloser(&githubRetryReadBody{remaining: size, fail: fail, downloaded: &downloaded})
+				return response, nil
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if mode == "cancelled" {
+				cancel()
+			}
+			remaining := int64(10)
+			var data []byte
+			var err error
+			switch mode {
+			case "unbudgeted":
+				data, err = client.getBytes(ctx, server.URL, 4)
+			case "nil":
+				data, err = client.getBytesBudgeted(ctx, server.URL, 4, nil)
+			case "cancelled":
+				data, err = client.getBytesBudgeted(ctx, server.URL, 4, &remaining)
+			}
+			if mode == "cancelled" {
+				if !errors.Is(err, context.Canceled) || calls != 0 || remaining != 10 {
+					t.Fatal("budgeted cancellation performed acquisition or changed budget")
+				}
+			} else if err != nil || string(data) != "xxx" || calls != 2 || downloaded != 5 {
+				t.Fatal("ordinary unbudgeted retry behavior changed")
+			}
+		})
 	}
 }
