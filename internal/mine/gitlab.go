@@ -572,6 +572,10 @@ func (p *gitlabProvider) acquireRun(ctx context.Context, run sourceRun, sink acq
 			return outcome, err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		outcome.State = "incomplete"
+		return outcome, err
+	}
 	jobs, err := p.listJobs(ctx, run, sink, &outcome)
 	if err != nil {
 		return outcome, err

@@ -1181,3 +1181,40 @@ func TestGitLabCancellationBeforeArtifact(t *testing.T) {
 		t.Fatal("canceled gap continuation emitted a later artifact or performed another source request")
 	}
 }
+
+func TestGitLabRunGapCancellationStops(t *testing.T) {
+	for _, location := range []string{"run_gap", "trace_gap"} {
+		t.Run(location, func(t *testing.T) {
+			c := &gitlabAcquisitionFixture{Version: "19.4.0"}
+			run := gitlabSourceRun()
+			wantReason := "trace_unavailable"
+			if location == "run_gap" {
+				run.Status = "running"
+				wantReason = "run_incomplete"
+			} else {
+				c.TraceStatus = http.StatusNotFound
+			}
+			p := gitlabAcquisitionProvider(t, c)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var reasons []string
+			artifacts := 0
+			sink := acquisitionSink{Gap: func(g acquisitionGap) error {
+				reasons = append(reasons, g.Reason)
+				cancel()
+				return nil
+			}, Artifact: func(acquiredArtifact) error { artifacts++; return nil }}
+			outcome, err := p.acquireRun(ctx, run, sink)
+			t.Logf("reasons=%v artifacts=%d jobs=%d reports=%d traces=%d state=%s original_cancellation=%t", reasons, artifacts, c.JobCalls, c.DirectCalls, c.TraceCalls, outcome.State, err == context.Canceled)
+			if err != context.Canceled || len(reasons) != 1 || reasons[0] != wantReason || artifacts != 0 || outcome.State != "incomplete" {
+				t.Fatal("cancellation after a gap acknowledgment allowed another callback or lost original cancellation")
+			}
+			if location == "run_gap" && (c.JobCalls != 0 || c.DirectCalls != 0 || c.TraceCalls != 0 || c.CommitCalls != 0 || c.ArchiveCalls != 0 || c.ModuleCalls != 0) {
+				t.Fatal("canceled run gap allowed later source requests")
+			}
+			if location == "trace_gap" && (c.JobCalls != 1 || c.DirectCalls != 1 || c.TraceCalls != 1 || c.CommitCalls != 0) {
+				t.Fatal("trace-gap cancellation changed its existing stop boundary")
+			}
+		})
+	}
+}
