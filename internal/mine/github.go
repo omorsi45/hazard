@@ -17,8 +17,10 @@ import (
 )
 
 type githubProvider struct {
-	request Request
-	client  *httpClient
+	// Bound during discovery, before acquisition workers start.
+	repositoryID int64
+	request      Request
+	client       *httpClient
 }
 
 func newGitHubProvider(request Request, client *httpClient) (*githubProvider, error) {
@@ -40,6 +42,30 @@ func (p *githubProvider) endpoint(endpoint string, query url.Values) string {
 
 func (p *githubProvider) nextPage(current string, headers http.Header) (string, error) {
 	next, err := p.client.nextPage(current, headers)
+	if err != nil && p.repositoryID > 0 {
+		before, parseErr := parseHTTPURL(current)
+		if parseErr == nil {
+			named, _ := url.Parse(p.endpoint("", nil))
+			namedPrefix := named.EscapedPath()
+			numericPrefix := strings.TrimSuffix(p.client.origin.EscapedPath(), "/") + "/repositories/" + strconv.FormatInt(p.repositoryID, 10) + "/"
+			escaped := before.EscapedPath()
+			alternate := ""
+			switch {
+			case strings.HasPrefix(escaped, namedPrefix):
+				alternate = numericPrefix + strings.TrimPrefix(escaped, namedPrefix)
+			case strings.HasPrefix(escaped, numericPrefix):
+				alternate = namedPrefix + strings.TrimPrefix(escaped, numericPrefix)
+			}
+			if alternate != "" {
+				alias := *before
+				alias.Path, parseErr = url.PathUnescape(alternate)
+				if parseErr == nil {
+					alias.RawPath = alternate
+					next, err = p.client.nextPage(alias.String(), headers)
+				}
+			}
+		}
+	}
 	if err != nil || next == "" {
 		return next, err
 	}
@@ -63,6 +89,7 @@ type githubRun struct {
 	CreatedAt     *time.Time `json:"created_at"`
 	RunAttempt    *int       `json:"run_attempt"`
 	Repository    *struct {
+		ID       int64  `json:"id"`
 		FullName string `json:"full_name"`
 	} `json:"repository"`
 }
@@ -119,6 +146,14 @@ func (p *githubProvider) listRuns(ctx context.Context) ([]sourceRun, []acquisiti
 				}
 				if r.Repository != nil && r.Repository.FullName != "" && r.Repository.FullName != p.request.Project {
 					return failure("discovery_source", &httpError{Reason: "invalid_response"})
+				}
+				if r.Repository != nil && r.Repository.ID > 0 {
+					if p.repositoryID != 0 && p.repositoryID != r.Repository.ID {
+						return failure("discovery_source", &httpError{Reason: "invalid_response"})
+					}
+					if r.Repository.FullName == p.request.Project {
+						p.repositoryID = r.Repository.ID
+					}
 				}
 				if r.CreatedAt.Before(since) || !r.CreatedAt.Before(until) || (p.request.Branch != "" && r.Branch != p.request.Branch) {
 					continue

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -35,7 +36,7 @@ func githubFixture(t *testing.T, request Request, handler http.HandlerFunc) *git
 }
 
 func githubRunJSON(id int64, seconds int, branch, project string) map[string]any {
-	return map[string]any{"id": id, "head_sha": strings.Repeat("a", 40), "head_branch": branch, "status": "completed", "created_at": githubRequest().Since.Add(time.Duration(seconds) * time.Second).Format(time.RFC3339), "run_attempt": 2, "repository": map[string]any{"full_name": project}}
+	return map[string]any{"id": id, "head_sha": strings.Repeat("a", 40), "head_branch": branch, "status": "completed", "created_at": githubRequest().Since.Add(time.Duration(seconds) * time.Second).Format(time.RFC3339), "run_attempt": 2, "repository": map[string]any{"id": 70936068, "full_name": project}}
 }
 
 func githubJSON(t *testing.T, w http.ResponseWriter, value any) {
@@ -1719,5 +1720,187 @@ func TestGitHubBranchSelection(t *testing.T) {
 				t.Fatalf("branch selection lost runs or admitted out-of-scope rows: ids=%v branches=%v pages=%d gaps=%v err=%v", ids, branches, calls, gaps, err)
 			}
 		})
+	}
+}
+
+func TestGitHubRepositoryPagination(t *testing.T) {
+	for _, tc := range []struct{ branch, ids, branches string }{{"", "17,18,21,22", "main,feature,feature,main"}, {"main", "17,22", "main,main"}} {
+		t.Run("branch="+tc.branch, func(t *testing.T) {
+			req := githubRequest()
+			req.Branch = tc.branch
+			calls := 0
+			p := githubFixture(t, req, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				q := r.URL.Query()
+				wantPath := "/repos/owner/repo/actions/runs"
+				if q.Get("page") == "2" {
+					wantPath = "/repositories/70936068/actions/runs"
+				}
+				_, branchPresent := q["branch"]
+				if r.URL.Path != wantPath || q.Get("created") != "2026-01-01T00:00:00Z..2026-01-01T00:00:04Z" || q.Get("per_page") != "100" || branchPresent != (tc.branch != "") || q.Get("branch") != tc.branch {
+					t.Error("canonical pagination changed source or request filters")
+				}
+				rows := []any{githubRunJSON(17, 0, "main", "owner/repo"), githubRunJSON(18, 1, "feature", "owner/repo"), githubRunJSON(19, -1, "main", "owner/repo")}
+				if q.Get("page") == "2" {
+					rows = []any{githubRunJSON(20, 4, "main", "owner/repo"), githubRunJSON(21, 3, "feature", "owner/repo"), githubRunJSON(22, 2, "main", "owner/repo")}
+				} else {
+					q.Set("page", "2")
+					w.Header().Set("Link", "</repositories/70936068/actions/runs?"+q.Encode()+`>; rel="next"`)
+				}
+				githubJSON(t, w, map[string]any{"total_count": 6, "workflow_runs": rows})
+			})
+			runs, gaps, err := p.listRuns(context.Background())
+			var ids, branches []string
+			for _, r := range runs {
+				ids = append(ids, r.ID)
+				branches = append(branches, r.Branch)
+				if r.SourceHeadSHA != strings.Repeat("a", 40) || r.CreatedAt == nil || r.CreatedAt.Before(req.Since) || !r.CreatedAt.Before(req.Until) || r.RunAttempt == nil || *r.RunAttempt != 2 {
+					t.Error("canonical page lost source facts")
+				}
+			}
+			if err != nil || len(gaps) != 0 || calls != 2 || strings.Join(ids, ",") != tc.ids || strings.Join(branches, ",") != tc.branches {
+				t.Fatalf("verified repository alias lost bounded history: ids=%v branches=%v calls=%d gaps=%v err=%v", ids, branches, calls, gaps, err)
+			}
+		})
+	}
+}
+
+func TestGitHubRepositoryIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		repository any
+		conflict   bool
+		reason     string
+	}{
+		{"missing", nil, false, "discovery_pagination"},
+		{"zero", map[string]any{"id": 0, "full_name": "owner/repo"}, false, "discovery_pagination"},
+		{"negative", map[string]any{"id": -1, "full_name": "owner/repo"}, false, "discovery_pagination"},
+		{"unverified_name", map[string]any{"id": 70936068}, false, "discovery_pagination"},
+		{"wrong_name", map[string]any{"id": 70936068, "full_name": "other/repo"}, false, "discovery_source"},
+		{"conflicting_id", map[string]any{"id": 70936069, "full_name": "owner/repo"}, true, "discovery_source"},
+		{"conflicting_id_without_name", map[string]any{"id": 70936069}, true, "discovery_source"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			p := githubFixture(t, githubRequest(), func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				q := r.URL.Query()
+				q.Set("page", "2")
+				w.Header().Set("Link", "</repositories/70936068/actions/runs?"+q.Encode()+`>; rel="next"`)
+				v := githubRunJSON(18, 1, "main", "owner/repo")
+				v["repository"] = tc.repository
+				rows := []any{v}
+				if tc.conflict {
+					rows = append([]any{githubRunJSON(17, 0, "main", "owner/repo")}, rows...)
+				}
+				githubJSON(t, w, map[string]any{"total_count": len(rows), "workflow_runs": rows})
+			})
+			_, gaps, err := p.listRuns(context.Background())
+			if err == nil || calls != 1 || len(gaps) != 1 || gaps[0].Reason != tc.reason {
+				t.Fatalf("unverified or conflicting repository identity followed alias: calls=%d gaps=%v err=%v", calls, gaps, err)
+			}
+		})
+	}
+}
+
+func TestGitHubRepositoryPageIsolation(t *testing.T) {
+	for _, basePrefix := range []string{"", "/api/v3"} {
+		t.Run("base="+basePrefix, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				githubJSON(t, w, map[string]any{"total_count": 1, "workflow_runs": []any{githubRunJSON(17, 1, "main", "owner/repo")}})
+			}))
+			defer server.Close()
+			client := mustHTTPClient(t, server.Client(), server.URL+basePrefix, "github")
+			p, err := newGitHubProvider(githubRequest(), client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, gaps, err := p.listRuns(context.Background()); err != nil || len(gaps) != 0 {
+				t.Fatal("verified fixture discovery failed")
+			}
+			current := p.endpoint("actions/runs", url.Values{"page": {"1"}, "per_page": {"100"}, "created": {"fixed-window"}})
+			named, _ := url.Parse(current)
+			numeric := *named
+			numeric.Path = basePrefix + "/repositories/70936068/actions/runs"
+			q := numeric.Query()
+			q.Set("page", "2")
+			numeric.RawQuery = q.Encode()
+			for _, tc := range []struct {
+				name   string
+				change func(*url.URL, *url.URL)
+				accept bool
+			}{
+				{"verified_numeric", func(*url.URL, *url.URL) {}, true},
+				{"wrong_id", func(_ *url.URL, n *url.URL) { n.Path = basePrefix + "/repositories/70936069/actions/runs" }, false},
+				{"id_prefix", func(_ *url.URL, n *url.URL) { n.Path = basePrefix + "/repositories/709360680/actions/runs" }, false},
+				{"resource", func(_ *url.URL, n *url.URL) { n.Path += "/17/artifacts" }, false},
+				{"filter", func(_ *url.URL, n *url.URL) { q := n.Query(); q.Set("created", "other"); n.RawQuery = q.Encode() }, false},
+				{"off_origin", func(_ *url.URL, n *url.URL) { n.Host = "other.invalid" }, false},
+				{"userinfo", func(_ *url.URL, n *url.URL) { n.User = url.User("other") }, false},
+				{"fragment", func(_ *url.URL, n *url.URL) { n.Fragment = "other" }, false},
+				{"encoded_suffix", func(_ *url.URL, n *url.URL) { n.RawPath = basePrefix + "/repositories/70936068/actions%2Fruns" }, false},
+				{"encoded_id", func(_ *url.URL, n *url.URL) { n.RawPath = basePrefix + "/repositories/%370936068/actions/runs" }, false},
+				{"loop", func(_ *url.URL, n *url.URL) { q := n.Query(); q.Set("page", "1"); n.RawQuery = q.Encode() }, false},
+				{"zero_page", func(_ *url.URL, n *url.URL) { q := n.Query(); q.Set("page", "0"); n.RawQuery = q.Encode() }, false},
+				{"current_origin", func(c *url.URL, _ *url.URL) { c.Host = "other.invalid" }, false},
+				{"current_userinfo", func(c *url.URL, _ *url.URL) { c.User = url.User("other") }, false},
+				{"current_fragment", func(c *url.URL, _ *url.URL) { c.Fragment = "other" }, false},
+				{"current_resource", func(c *url.URL, _ *url.URL) { c.Path += "-other" }, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					c, n := *named, numeric
+					tc.change(&c, &n)
+					next, err := p.nextPage(c.String(), http.Header{"Link": {"<" + n.String() + `>; rel="next"`}})
+					if tc.accept {
+						if err != nil || next != n.String() {
+							t.Fatalf("verified same-resource alias rejected: %v", err)
+						}
+					} else if err == nil || next != "" {
+						t.Fatal("repository alias escaped current source/resource boundary")
+					}
+				})
+			}
+			reverseCurrent := numeric
+			reverseNext := *named
+			q = reverseNext.Query()
+			q.Set("page", "3")
+			reverseNext.RawQuery = q.Encode()
+			next, err := p.nextPage(reverseCurrent.String(), http.Header{"Link": {"<" + reverseNext.String() + `>; rel="next"`}})
+			if err != nil || next != reverseNext.String() {
+				t.Fatal("verified numeric-to-named alias rejected")
+			}
+		})
+	}
+}
+
+func TestGitHubRepositoryArtifactPagination(t *testing.T) {
+	calls := 0
+	p := githubFixture(t, githubRequest(), func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/actions/runs") {
+			githubJSON(t, w, map[string]any{"total_count": 1, "workflow_runs": []any{githubRunJSON(17, 1, "main", "owner/repo")}})
+			return
+		}
+		calls++
+		q := r.URL.Query()
+		id := int64(301)
+		if q.Get("page") == "2" {
+			id = 302
+			if r.URL.Path != "/repositories/70936068/actions/runs/17/artifacts" {
+				t.Error("artifact alias changed resource")
+			}
+		} else {
+			q.Set("page", "2")
+			w.Header().Set("Link", "</repositories/70936068/actions/runs/17/artifacts?"+q.Encode()+`>; rel="next"`)
+		}
+		githubJSON(t, w, map[string]any{"total_count": 2, "artifacts": []any{githubArtifactJSON(id)}})
+	})
+	runs, gaps, err := p.listRuns(context.Background())
+	if err != nil || len(gaps) != 0 || len(runs) != 1 {
+		t.Fatal("repository identity not established before acquisition")
+	}
+	outcome := runOutcome{State: "complete"}
+	artifacts, err := p.listArtifacts(context.Background(), runs[0], githubGapSink(&gaps), &outcome)
+	if err != nil || len(gaps) != 0 || calls != 2 || len(artifacts) != 2 || artifacts[0].ID != 301 || artifacts[1].ID != 302 || outcome.State != "complete" {
+		t.Fatalf("frozen repository alias did not reach artifact consumer: artifacts=%v calls=%d gaps=%v err=%v", artifacts, calls, gaps, err)
 	}
 }

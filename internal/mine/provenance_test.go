@@ -274,3 +274,106 @@ func TestProvenanceCommentedReportSwitch(t *testing.T) {
 		})
 	}
 }
+
+func provenanceInputFixture() ([]byte, githubProvenanceContext) {
+	log, c := provenanceFixture()
+	const stamp = "2026-09-22T19:31:03.7731091Z "
+	setup := stamp + "##[group]Run astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4\n" + stamp + "with:\n" + stamp + "  cache-dependency-glob: **/*requirements*.txt\n**/*requirements*.in\n**/uv.lock\n\n" + stamp + "  restore-cache: true\n" + stamp + "##[endgroup]\n"
+	log = bytes.Replace(log, []byte(stamp+"##[group]Run uv run"), []byte(setup+stamp+"##[group]Run uv run"), 1)
+	log = bytes.Replace(log, []byte(stamp+"  path: reports/junit.xml\n"), []byte(stamp+"with:\n"+stamp+"  path: reports/junit.xml\ncoverage.xml\ncoverage/\nf54072d50807421e0d464df269e6c46a3e322a81\n\n"), 1)
+	return log, c
+}
+
+func TestProvenanceActionInputContinuations(t *testing.T) {
+	log, c := provenanceInputFixture()
+	got, err := verifyGitHubProvenance(log, c)
+	digest := sha256.Sum256(log)
+	if err != nil || got.TestedSHA != "3329023300bb33fd3fa6430e2dafbb158deb0508" || got.CheckoutRef != "refs/remotes/pull/17/merge" || got.LogSHA256 != hex.EncodeToString(digest[:]) || got.ProducerEvidence != "github_run=35774037511;attempt=1;job=106902574731;artifact=10715173308;zip_sha256=e88639bc11ac82b50d7d908ba1b596b43a99c8aa3cdcf16447332033cb11c515" || got.Language != "python" || got.ReportPath != "reports/junit.xml" {
+		t.Fatalf("measured opaque action input continuations lost exact provenance: %v", err)
+	}
+}
+
+func TestProvenanceLeadingBOM(t *testing.T) {
+	log, c := provenanceFixture()
+	log = append([]byte{0xef, 0xbb, 0xbf}, log...)
+	got, err := verifyGitHubProvenance(log, c)
+	digest := sha256.Sum256(log)
+	if err != nil || got.TestedSHA != "3329023300bb33fd3fa6430e2dafbb158deb0508" || got.LogSHA256 != hex.EncodeToString(digest[:]) || got.ProducerEvidence == "" || got.Language != "python" || got.ReportPath != "reports/junit.xml" {
+		t.Fatalf("one leading BOM lost original digest or exact producer: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		change func([]byte) []byte
+	}{
+		{"double_prefix", func(b []byte) []byte { return append([]byte{0xef, 0xbb, 0xbf}, b...) }},
+		{"nonleading_prefix", func(b []byte) []byte { return bytes.Replace(b, []byte("\n"), []byte("\n\xef\xbb\xbf"), 1) }},
+		{"truncated", func(b []byte) []byte { return bytes.TrimSuffix(b, []byte("\n")) }},
+		{"invalid_utf8", func(b []byte) []byte { return bytes.Replace(b, []byte("tests completed"), []byte{0xff}, 1) }},
+		{"incomplete", func(b []byte) []byte {
+			return bytes.Replace(b, []byte("Cleaning up orphan processes"), []byte("incomplete tail"), 1)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) { assertProvenanceRejected(t, tc.change(log), c) })
+	}
+	t.Run("context_mismatch", func(t *testing.T) { c.ArtifactRunID++; assertProvenanceRejected(t, log, c) })
+}
+
+func TestProvenanceInputContinuationGuards(t *testing.T) {
+	const stamp = "2026-09-22T19:31:03.7731091Z "
+	for _, tc := range []struct{ name, old, new string }{
+		{"orphan", stamp + "##[group]Run actions/checkout@", "**/uv.lock\n" + stamp + "##[group]Run actions/checkout@"},
+		{"other_input", "  cache-dependency-glob:", "  other-input:"},
+		{"other_action", "astral-sh/setup-uv@", "owner/action@"},
+		{"unpinned_action", "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4", "astral-sh/setup-uv@v7"},
+		{"outside_with", stamp + "with:\n" + stamp + "  cache-dependency-glob:", stamp + "not-with:\n" + stamp + "  cache-dependency-glob:"},
+		{"other_section", stamp + "with:\n" + stamp + "  cache-dependency-glob:", stamp + "env:\n" + stamp + "  cache-dependency-glob:"},
+		{"closed_group", "**/*requirements*.in\n", stamp + "##[endgroup]\n**/*requirements*.in\n"},
+		{"nested_group", stamp + "  cache-dependency-glob:", stamp + "##[group]nested\n" + stamp + "  cache-dependency-glob:"},
+		{"next_timestamp", "**/*requirements*.in\n", stamp + "  restore-cache: true\n**/*requirements*.in\n"},
+		{"left_with_header", stamp + "  cache-dependency-glob:", stamp + "action output\n" + stamp + "  cache-dependency-glob:"},
+		{"test_script", stamp + "uv run --no-sync pytest --junitxml=reports/junit.xml\n", stamp + "uv run --no-sync pytest --junitxml=reports/junit.xml\n**/uv.lock\n"},
+		{"command", "**/*requirements*.in", "git switch main"},
+		{"control_marker", "**/*requirements*.in", "##[endgroup]"},
+		{"embedded_BOM", "**/*requirements*.in", "\xef\xbb\xbf**/uv.lock"},
+		{"oversized_line", "**/*requirements*.in", strings.Repeat("x", (64<<10)+1)},
+		{"pending_checkout_sha", stamp + "3329023300bb33fd3fa6430e2dafbb158deb0508\n", "3329023300bb33fd3fa6430e2dafbb158deb0508\n"},
+		{"upload_outside_with", stamp + "with:\n" + stamp + "  path:", stamp + "not-with:\n" + stamp + "  path:"},
+		{"upload_other_input", "  path: reports/junit.xml", "  other-input: reports/junit.xml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log, c := provenanceInputFixture()
+			assertProvenanceRejected(t, []byte(strings.ReplaceAll(string(log), tc.old, tc.new)), c)
+		})
+	}
+}
+
+func TestProvenancePhysicalContinuationGuards(t *testing.T) {
+	for _, tc := range []struct{ name, replacement string }{
+		{"ansi_control_token", "\x1b[32m**/*requirements*.in\x1b[0m"},
+		{"oversized_physical_line", strings.Repeat("\x1b[0m", (64<<10)/4+1) + "**/*requirements*.in"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log, c := provenanceInputFixture()
+			log = bytes.Replace(log, []byte("**/*requirements*.in"), []byte(tc.replacement), 1)
+			assertProvenanceRejected(t, log, c)
+		})
+	}
+	t.Run("oversized_timestamped_line", func(t *testing.T) {
+		log, c := provenanceInputFixture()
+		log = bytes.Replace(log, []byte("tests completed"), []byte(strings.Repeat("\x1b[0m", (64<<10)/4+1)+"tests completed"), 1)
+		got, err := verifyGitHubProvenance(log, c)
+		var bounded *githubProvenanceError
+		if !errors.As(err, &bounded) || bounded.Reason != "unsupported_log" || !reflect.DeepEqual(got, githubProvenance{}) {
+			t.Fatal("oversized timestamped physical line bypassed original byte bound")
+		}
+	})
+	t.Run("CRLF_framing", func(t *testing.T) {
+		log, c := provenanceInputFixture()
+		log = bytes.ReplaceAll(log, []byte("\n"), []byte("\r\n"))
+		got, err := verifyGitHubProvenance(log, c)
+		digest := sha256.Sum256(log)
+		if err != nil || got.TestedSHA != "3329023300bb33fd3fa6430e2dafbb158deb0508" || got.LogSHA256 != hex.EncodeToString(digest[:]) || got.ReportPath != "reports/junit.xml" {
+			t.Fatalf("CRLF framing lost opaque continuations or original digest: %v", err)
+		}
+	})
+}

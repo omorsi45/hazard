@@ -35,6 +35,8 @@ var (
 	logANSI           = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 	checkoutAction    = regexp.MustCompile(`^actions/checkout@[0-9a-f]{40}$`)
 	uploadAction      = regexp.MustCompile(`^actions/upload-artifact@[0-9a-f]{40}$`)
+	setupUVAction     = regexp.MustCompile(`^astral-sh/setup-uv@[0-9a-f]{40}$`)
+	inputToken        = regexp.MustCompile(`^[A-Za-z0-9_./*?-]*$`)
 	gitLogCommand     = regexp.MustCompile(`^(?:\[command\](?:/[^ ]+/)?git|git) (.*)$`)
 	artifactFinalized = regexp.MustCompile(`^Artifact [A-Za-z0-9._-]{1,128} successfully finalized\. Artifact ID ([0-9]+)$`)
 	artifactUploaded  = regexp.MustCompile(`^Artifact [A-Za-z0-9._-]{1,128} has been successfully uploaded! Final size is ([0-9]+) bytes\. Artifact ID is ([0-9]+)$`)
@@ -105,23 +107,37 @@ func verifyGitHubProvenance(log []byte, c githubProvenanceContext) (githubProven
 	if !utf8.Valid(log) || !bytes.HasSuffix(log, []byte("\n")) {
 		return failure("unsupported_log")
 	}
-	derived := logANSI.ReplaceAllString(string(log), "")
-	if strings.ContainsRune(derived, '\x1b') {
-		return failure("unsupported_log")
-	}
-	phase := ""
+	phase, inputAction := "", ""
+	inputHeader, inputContinuation := false, false
 	groups, checkouts, checkoutCommands, uploads, producers := 0, 0, 0, 0, 0
 	repository, cwd, ref, testedSHA, uploadDigest, reportPath, echoCommand, lastBody := "", "", "", "", "", "", "", ""
 	pendingSHA, finalized, uploaded := false, false, false
 	testEcho, testScriptSafe, testEnv, failedTest := false, false, false, false
-	for _, line := range strings.Split(strings.TrimSuffix(derived, "\n"), "\n") {
+	for i, line := range strings.Split(strings.TrimSuffix(string(log), "\n"), "\n") {
+		if len(line) > 64<<10 {
+			return failure("unsupported_log")
+		}
+		physical := strings.TrimSuffix(line, "\r")
+		if i == 0 {
+			line = strings.TrimPrefix(line, "\ufeff")
+		}
+		line = logANSI.ReplaceAllString(line, "")
+		if strings.ContainsRune(line, '\x1b') {
+			return failure("unsupported_log")
+		}
 		stamp, body, ok := strings.Cut(line, " ")
-		if !ok || len(line) > 64<<10 {
+		if ok {
+			_, err := time.Parse(time.RFC3339Nano, stamp)
+			ok = err == nil && strings.HasSuffix(stamp, "Z")
+		}
+		if !ok {
+			// Continuation values remain opaque, never commands or provenance evidence.
+			if inputContinuation && !pendingSHA && inputToken.MatchString(physical) {
+				continue
+			}
 			return failure("unsupported_log")
 		}
-		if _, err := time.Parse(time.RFC3339Nano, stamp); err != nil || !strings.HasSuffix(stamp, "Z") {
-			return failure("unsupported_log")
-		}
+		inputContinuation = false
 		body = strings.TrimSuffix(body, "\r")
 		lastBody = body
 		if pendingSHA {
@@ -140,6 +156,7 @@ func verifyGitHubProvenance(log []byte, c githubProvenanceContext) (githubProven
 			continue
 		}
 		if strings.HasPrefix(body, "##[group]") {
+			inputAction, inputHeader = "", false
 			if strings.HasPrefix(body, "##[group]Run ") {
 				if groups != 0 {
 					return failure("incomplete_groups")
@@ -154,7 +171,10 @@ func verifyGitHubProvenance(log []byte, c githubProvenanceContext) (githubProven
 						return failure("checkout_ambiguity")
 					}
 					phase = "checkout"
+				case setupUVAction.MatchString(command):
+					inputAction = "setup-uv"
 				case uploadAction.MatchString(command):
+					inputAction = "upload"
 					uploads++
 					if uploads != 1 || testedSHA == "" {
 						return failure("upload_association")
@@ -182,6 +202,7 @@ func verifyGitHubProvenance(log []byte, c githubProvenanceContext) (githubProven
 			continue
 		}
 		if body == "##[endgroup]" {
+			inputAction, inputHeader = "", false
 			groups--
 			if groups < 0 {
 				return failure("incomplete_groups")
@@ -189,7 +210,24 @@ func verifyGitHubProvenance(log []byte, c githubProvenanceContext) (githubProven
 			continue
 		}
 
+		if groups == 1 && inputAction != "" {
+			if body == "with:" {
+				inputHeader = true
+			} else if !strings.HasPrefix(body, "  ") {
+				inputHeader = false
+			}
+			if inputHeader {
+				switch {
+				case inputAction == "setup-uv" && strings.HasPrefix(body, "  cache-dependency-glob: "):
+					inputContinuation = inputToken.MatchString(strings.TrimPrefix(body, "  cache-dependency-glob: "))
+				case inputAction == "upload" && strings.HasPrefix(body, "  path: "):
+					inputContinuation = inputToken.MatchString(strings.TrimPrefix(body, "  path: "))
+				}
+			}
+		}
+
 		if strings.HasPrefix(body, "Post ") {
+			inputAction, inputHeader = "", false
 			phase = "other"
 			echoCommand = ""
 		}
