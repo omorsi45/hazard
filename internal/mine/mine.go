@@ -154,6 +154,20 @@ func mineWithProvider(ctx context.Context, req Request, provider acquisitionProv
 				}
 			}
 		}
+		checkpoint := func(record *mineRun, state string) {
+			checkpointCtx := bookkeeping()
+			if detached != nil && state != "capped" {
+				state = "incomplete"
+			}
+			checkpointErr := w.checkpoint(checkpointCtx, record, state)
+			addError(checkpointErr)
+			if checkpointErr != nil && detached == nil && ctx.Err() != nil {
+				if state != "capped" {
+					state = "incomplete"
+				}
+				addError(w.checkpoint(bookkeeping(), record, state))
+			}
+		}
 		if err == nil && ctx.Err() != nil {
 			err = ctx.Err()
 		}
@@ -167,11 +181,11 @@ func mineWithProvider(ctx context.Context, req Request, provider acquisitionProv
 			if state != "capped" && (m.sourceErr != nil || m.callbackErr != nil || m.run.gap || w.canceled || ctx.Err() != nil) {
 				state = "incomplete"
 			}
-			addError(w.checkpoint(bookkeeping(), m.run, state))
+			checkpoint(m.run, state)
 		}
 		for id, record := range w.runs {
 			if !finalized[id] && record.state == "" {
-				addError(w.checkpoint(bookkeeping(), record, "incomplete"))
+				checkpoint(record, "incomplete")
 			}
 		}
 		snapshot, snapshotErr := persistenceStats(bookkeeping(), w.db)
@@ -201,6 +215,9 @@ func mineWithProvider(ctx context.Context, req Request, provider acquisitionProv
 		}
 		stats.Activity = w.activity
 		stats.RequestedSince, stats.RequestedUntil = req.Since, req.Until
+		if cancellationErr := ctx.Err(); cancellationErr != nil && !errors.Is(err, cancellationErr) {
+			addError(cancellationErr)
+		}
 	}()
 	runs, gaps, sourceErr := provider.listRuns(ctx)
 	for _, run := range runs {
