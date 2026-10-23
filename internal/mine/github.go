@@ -84,7 +84,10 @@ func (p *githubProvider) listRuns(ctx context.Context) ([]sourceRun, []acquisiti
 		if !since.Before(until) || stopped {
 			return nil
 		}
-		query := url.Values{"branch": {p.request.Branch}, "created": {since.Format(time.RFC3339Nano) + ".." + until.Format(time.RFC3339Nano)}, "per_page": {"100"}, "page": {"1"}}
+		query := url.Values{"created": {since.Format(time.RFC3339Nano) + ".." + until.Format(time.RFC3339Nano)}, "per_page": {"100"}, "page": {"1"}}
+		if p.request.Branch != "" {
+			query.Set("branch", p.request.Branch)
+		}
 		current := p.endpoint("actions/runs", query)
 		pages := make(map[string]bool)
 		capped, count, total := false, 0, -1
@@ -117,7 +120,7 @@ func (p *githubProvider) listRuns(ctx context.Context) ([]sourceRun, []acquisiti
 				if r.Repository != nil && r.Repository.FullName != "" && r.Repository.FullName != p.request.Project {
 					return failure("discovery_source", &httpError{Reason: "invalid_response"})
 				}
-				if r.CreatedAt.Before(since) || !r.CreatedAt.Before(until) || r.Branch != p.request.Branch {
+				if r.CreatedAt.Before(since) || !r.CreatedAt.Before(until) || (p.request.Branch != "" && r.Branch != p.request.Branch) {
 					continue
 				}
 				if index, exists := seen[r.ID]; exists {

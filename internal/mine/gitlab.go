@@ -130,7 +130,7 @@ func (p *gitlabProvider) pipelineRun(row gitlabPipeline) (sourceRun, bool, error
 	if row.ID <= 0 || row.CreatedAt == nil || row.CreatedAt.IsZero() || (row.SHA != "" && !hexadecimal(row.SHA, 40)) || (row.ProjectID != nil && *row.ProjectID != p.projectID) {
 		return sourceRun{}, false, &httpError{Reason: "invalid_response"}
 	}
-	if row.Ref != p.request.Branch || row.CreatedAt.Before(p.request.Since) || !row.CreatedAt.Before(p.request.Until) {
+	if (p.request.Branch != "" && row.Ref != p.request.Branch) || row.CreatedAt.Before(p.request.Since) || !row.CreatedAt.Before(p.request.Until) {
 		return sourceRun{}, false, nil
 	}
 	return sourceRun{ID: strconv.FormatInt(row.ID, 10), SourceHeadSHA: row.SHA, Branch: row.Ref, Status: row.Status, CreatedAt: row.CreatedAt}, true, nil
@@ -224,7 +224,10 @@ func (p *gitlabProvider) listRuns(ctx context.Context) ([]sourceRun, []acquisiti
 		inspected++
 		return true
 	}
-	query := url.Values{"ref": {p.request.Branch}, "created_after": {p.request.Since.Format(time.RFC3339Nano)}, "created_before": {p.request.Until.Format(time.RFC3339Nano)}, "per_page": {"100"}, "page": {"1"}}
+	query := url.Values{"created_after": {p.request.Since.Format(time.RFC3339Nano)}, "created_before": {p.request.Until.Format(time.RFC3339Nano)}, "per_page": {"100"}, "page": {"1"}}
+	if p.request.Branch != "" {
+		query.Set("ref", p.request.Branch)
+	}
 	current := p.projectEndpoint("pipelines", query)
 	pages := map[string]bool{}
 	for pageNumber := 0; current != ""; pageNumber++ {

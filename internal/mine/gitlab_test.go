@@ -1218,3 +1218,60 @@ func TestGitLabRunGapCancellationStops(t *testing.T) {
 		})
 	}
 }
+
+func TestGitLabBranchSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name, branch, ids, branches string
+		gaps                        int
+	}{
+		{"all", "", "17,18,21,22", "main,feature,feature,release", 0},
+		{"explicit", "main", "17", "main", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := gitlabRequest()
+			req.Branch = tc.branch
+			pages := 0
+			p := gitlabDiscoveryFixture(t, req, "19.4.0", func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v4/projects/42/pipelines":
+					pages++
+					q := r.URL.Query()
+					_, present := q["ref"]
+					if present != (tc.branch != "") || q.Get("ref") != tc.branch {
+						t.Errorf("ref query presence/value mismatch: present=%v value=%q", present, q.Get("ref"))
+					}
+					if q.Get("created_after") != "2026-01-01T00:00:00Z" || q.Get("created_before") != "2026-01-01T00:00:04Z" || q.Get("per_page") != "100" {
+						t.Error("ref selection changed source/date bounds")
+					}
+					if q.Get("page") == "2" {
+						gitlabJSON(t, w, []any{gitlabPipelineJSON(20, 4, "main"), gitlabPipelineJSON(21, 3, "feature")})
+						return
+					}
+					w.Header().Set("X-Next-Page", "2")
+					gitlabJSON(t, w, []any{gitlabPipelineJSON(17, 0, "main"), gitlabPipelineJSON(18, 1, "feature"), gitlabPipelineJSON(19, -1, "main")})
+				case "/api/v4/projects/42/pipelines/17/trigger_jobs":
+					gitlabJSON(t, w, []any{map[string]any{"id": 1, "downstream_pipeline": map[string]any{"id": 22, "project_id": 42}}})
+				case "/api/v4/projects/42/pipelines/22":
+					gitlabJSON(t, w, gitlabPipelineJSON(22, 2, "release"))
+				case "/api/v4/projects/42/pipelines/18/trigger_jobs", "/api/v4/projects/42/pipelines/21/trigger_jobs", "/api/v4/projects/42/pipelines/22/trigger_jobs":
+					gitlabJSON(t, w, []any{})
+				default:
+					t.Error("branch selection requested an unexpected/out-of-scope route")
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+			runs, gaps, err := p.listRuns(context.Background())
+			var ids, branches []string
+			for _, run := range runs {
+				ids = append(ids, run.ID)
+				branches = append(branches, run.Branch)
+			}
+			if err != nil || len(gaps) != tc.gaps || pages != 2 || strings.Join(ids, ",") != tc.ids || strings.Join(branches, ",") != tc.branches {
+				t.Fatalf("ref selection lost runs or admitted out-of-scope rows: ids=%v branches=%v pages=%d gaps=%v err=%v", ids, branches, pages, gaps, err)
+			}
+			if tc.gaps == 1 && (gaps[0].Reason != "downstream_outside_scope" || gaps[0].Detail != "ref_or_window") {
+				t.Fatal("explicit branch accepted a mismatched downstream ref")
+			}
+		})
+	}
+}

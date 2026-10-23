@@ -1680,3 +1680,44 @@ func TestGitHubLogSourceFailureRetainsArtifact(t *testing.T) {
 		})
 	}
 }
+
+func TestGitHubBranchSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name, branch, ids, branches string
+	}{
+		{"all", "", "17,18,21", "main,feature,feature"},
+		{"explicit", "main", "17", "main"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := githubRequest()
+			req.Branch = tc.branch
+			calls := 0
+			p := githubFixture(t, req, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				q := r.URL.Query()
+				_, present := q["branch"]
+				if present != (tc.branch != "") || q.Get("branch") != tc.branch {
+					t.Errorf("branch query presence/value mismatch: present=%v value=%q", present, q.Get("branch"))
+				}
+				if r.URL.Path != "/repos/owner/repo/actions/runs" || q.Get("created") != "2026-01-01T00:00:00Z..2026-01-01T00:00:04Z" || q.Get("per_page") != "100" {
+					t.Error("branch selection changed source/date bounds")
+				}
+				if q.Get("page") == "2" {
+					githubJSON(t, w, map[string]any{"total_count": 5, "workflow_runs": []any{githubRunJSON(20, 4, "main", "owner/repo"), githubRunJSON(21, 3, "feature", "owner/repo")}})
+					return
+				}
+				githubNext(w, r, 2)
+				githubJSON(t, w, map[string]any{"total_count": 5, "workflow_runs": []any{githubRunJSON(17, 0, "main", "owner/repo"), githubRunJSON(18, 1, "feature", "owner/repo"), githubRunJSON(19, -1, "main", "owner/repo")}})
+			})
+			runs, gaps, err := p.listRuns(context.Background())
+			var ids, branches []string
+			for _, run := range runs {
+				ids = append(ids, run.ID)
+				branches = append(branches, run.Branch)
+			}
+			if err != nil || len(gaps) != 0 || calls != 2 || strings.Join(ids, ",") != tc.ids || strings.Join(branches, ",") != tc.branches {
+				t.Fatalf("branch selection lost runs or admitted out-of-scope rows: ids=%v branches=%v pages=%d gaps=%v err=%v", ids, branches, calls, gaps, err)
+			}
+		})
+	}
+}
