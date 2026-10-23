@@ -1021,3 +1021,92 @@ func TestMineGapDetailCodesOnly(t *testing.T) {
 		}
 	}
 }
+
+type mineCancelAfterErrContext struct {
+	context.Context
+	cancel    context.CancelFunc
+	remaining atomic.Int32
+	armed     atomic.Bool
+}
+
+func (c *mineCancelAfterErrContext) Err() error {
+	err := c.Context.Err()
+	// Cancel after a truthful snapshot to reproduce arrival just after a check.
+	if err == nil && c.armed.Load() && c.remaining.Add(-1) == 0 {
+		c.cancel()
+	}
+	return err
+}
+
+func TestMineCancellationAtCheckpointBoundary(t *testing.T) {
+	for _, checks := range []int32{3, 4} {
+		t.Run(strconv.Itoa(int(checks)), func(t *testing.T) {
+			r := mineRequest(t)
+			a := mineArtifact()
+			p := mineRunProvider(a)
+			p.acquire = func(_ context.Context, run sourceRun, s acquisitionSink) (runOutcome, error) {
+				err := s.Gap(acquisitionGap{RunID: run.ID, UnitKey: "jobs", Reason: "jobs_unavailable"})
+				return runOutcome{State: "incomplete"}, err
+			}
+			mineDo(t, r, p)
+			parent, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ctx := &mineCancelAfterErrContext{Context: parent, cancel: cancel}
+			ctx.remaining.Store(checks)
+			created := r.Since
+			p.list = func(context.Context) ([]sourceRun, []acquisitionGap, error) {
+				return []sourceRun{{ID: a.Observation.RunID, RunAttempt: persistPtr(3), SourceHeadSHA: a.Observation.SourceHeadSHA, Branch: a.Observation.Branch, CreatedAt: &created}}, nil, nil
+			}
+			p.acquire = func(context.Context, sourceRun, acquisitionSink) (runOutcome, error) {
+				ctx.armed.Store(true)
+				return runOutcome{State: "complete", Attempts: []int{2}}, nil
+			}
+			stats, err := mineWithProvider(ctx, r, p)
+			if parent.Err() != context.Canceled {
+				t.Fatal("fixture did not cancel at checkpoint boundary")
+			}
+			if err != context.Canceled || stats.ActiveGaps != 1 || stats.Activity.IncompleteRuns != 1 {
+				t.Errorf("late checkpoint cancellation lost: err=%v active_gaps=%d incomplete=%d", err, stats.ActiveGaps, stats.Activity.IncompleteRuns)
+			}
+			mineCheck(t, r, func(db *sql.DB) {
+				if n := mineScalar(t, db, `SELECT count(*) FROM acquisition_gaps WHERE resolved_at IS NULL`); n != 1 {
+					t.Error("canceled checkpoint resolved active gap")
+				}
+				if n := mineScalar(t, db, `SELECT count(*) FROM mining_runs WHERE state='complete'`); n != 0 {
+					t.Error("canceled checkpoint promoted completion")
+				}
+				if n := mineScalar(t, db, `SELECT count(*) FROM mining_runs WHERE state='incomplete' AND attempt IN (1,2,3)`); n != 3 {
+					t.Errorf("canceled checkpoint lost conservative known attempts: %d", n)
+				}
+				if n := mineScalar(t, db, `SELECT count(*) FROM mining_runs WHERE attempt IN (2,3) AND source_head_sha=? AND branch=? AND created_at=?`, a.Observation.SourceHeadSHA, a.Observation.Branch, created.Format(observationTimeFormat)); n != 2 {
+					t.Error("canceled checkpoint lost actual source facts")
+				}
+			})
+		})
+	}
+}
+
+func TestMineLateCancellationRetainsCleanupFailure(t *testing.T) {
+	r := mineRequest(t)
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := &mineCancelAfterErrContext{Context: parent, cancel: cancel}
+	ctx.remaining.Store(3)
+	p := mineRunProvider(mineArtifact())
+	p.acquire = func(context.Context, sourceRun, acquisitionSink) (runOutcome, error) {
+		mineCheck(t, r, func(db *sql.DB) {
+			if _, err := db.Exec(`CREATE TRIGGER fail_late_cleanup BEFORE UPDATE ON mining_runs BEGIN SELECT RAISE(ABORT,'fixture late cleanup failure'); END`); err != nil {
+				t.Fatal(err)
+			}
+		})
+		ctx.armed.Store(true)
+		return runOutcome{State: "complete", Attempts: []int{1}}, nil
+	}
+	_, err := mineWithProvider(ctx, r, p)
+	if parent.Err() != context.Canceled {
+		t.Fatal("fixture did not cancel at checkpoint boundary")
+	}
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "fixture late cleanup failure") {
+		t.Fatalf("late cancellation or cleanup failure lost: %v", err)
+	}
+}
