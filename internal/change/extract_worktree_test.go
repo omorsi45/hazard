@@ -195,6 +195,13 @@ func TestExtractWorkingTree(t *testing.T) {
 		}
 	})
 
+	t.Run("repoDir may be a subdirectory of the work tree", func(t *testing.T) {
+		got := mustExtract(t, r.path("pkg"), testOptions())
+		if !reflect.DeepEqual(paths(got), paths(cs)) || got.Dirty != cs.Dirty || got.BaseSHA != cs.BaseSHA {
+			t.Errorf("from pkg/: paths %q Dirty %v Base %s; want %q %v %s", paths(got), got.Dirty, got.BaseSHA, paths(cs), cs.Dirty, cs.BaseSHA)
+		}
+	})
+
 	t.Run("explicit base spans the commit and the working tree", func(t *testing.T) {
 		opts := testOptions()
 		opts.Base = r.sha(1)[:10] // abbreviated
