@@ -1,0 +1,12 @@
+<testsuites>
+  <testsuite name="outer">
+    <properties><property name="environment" value="outer"/></properties>
+    <testcase name="same"/>
+    <testsuite name="inner">
+      <properties><property name="environment" value="inner"/></properties>
+      <testcase name="same"/>
+    </testsuite>
+    <testcase name="same"><properties><property name="environment" value="case"/></properties></testcase>
+    <properties><property name="late" value="outer-value"/></properties>
+  </testsuite>
+</testsuites>

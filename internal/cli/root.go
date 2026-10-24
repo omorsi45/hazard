@@ -13,6 +13,8 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/spf13/cobra"
+
+	"github.com/omorsi45/hazard/internal/mine"
 )
 
 const version = "0.1.0-dev"
@@ -65,18 +67,7 @@ func NewRoot() *cobra.Command {
 	run.Args = cobra.ArbitraryArgs
 	root.AddCommand(run)
 
-	mine := leaf("ci-mine", "Mine CI history")
-	mine.Flags().String("provider", "", "gitlab|github")
-	mine.Flags().String("project", "", "project identifier")
-	mine.Flags().String("since", "", "window start")
-	mine.Flags().String("until", "", "window end")
-	mine.Flags().String("branch", "main", "branch")
-	mine.Flags().String("token-env", "HAZARD_CI_TOKEN", "token environment variable")
-	mine.Flags().String("junit-glob", "**/junit*.xml", "JUnit artifact glob")
-	mine.Flags().Int("max-pipelines", 5000, "pipeline limit")
-	mine.Flags().Int("concurrency", 8, "download concurrency")
-	mine.Flags().Bool("resume", false, "resume prior mining")
-	root.AddCommand(mine)
+	root.AddCommand(newMineCommand(mine.Mine))
 
 	labels := &cobra.Command{Use: "labels", Short: "Build and inspect regression labels"}
 	for _, item := range []struct{ name, purpose string }{
