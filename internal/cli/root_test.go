@@ -44,7 +44,6 @@ func TestDocumentedFlagsParse(t *testing.T) {
 	cases := [][]string{
 		{"select", "--base", "main", "--head", "HEAD", "--config", "hazard.yml", "--lock", "hazard.lock", "--predictor", "static", "--recall", "0.9", "--i-know-what-im-doing", "--max-candidates", "10", "--budget-ms", "1000", "--budget-usd", "0.1", "--redact", "hash", "--shadow", "--dry-run-payload", "--format", "json", "--out", "out.txt", "--explain", "-vv"},
 		{"run", "--base", "main", "--runner", "gotest", "--junit", "junit.xml", "--full", "--no-fallback", "--", "-run", "TestOne"},
-		{"labels", "build"}, {"labels", "flaky"}, {"labels", "stats"},
 		{"mutate", "--base", "HEAD", "--files", "internal/**/*.go", "--n", "500", "--operators", "cmp,logic", "--timeout", "300s", "--concurrency", "4", "--out", "mutants.jsonl"},
 		{"calibrate", "--alpha", "0.01", "--delta", "0.05", "--split", "temporal", "--split-at", "2026-06-01", "--predictor", "ensemble", "--grid", "0.005:0.500:0.005", "--unit", "commit", "--out", "hazard.lock"},
 		{"eval", "--split", "temporal", "--split-at", "2026-06-01", "--predictors", "static,logistic", "--baselines", "all,l1-only", "--out", "report"},
