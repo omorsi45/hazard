@@ -87,8 +87,8 @@ func TestReopenPreservesDataAndMigrationCount(t *testing.T) {
 	if err := again.DB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 3 {
-		t.Fatalf("migration rows = %d, want 3", versions)
+	if versions != 4 {
+		t.Fatalf("migration rows = %d, want 4", versions)
 	}
 }
 
@@ -99,7 +99,7 @@ func TestMigrationFailureRollsBackTablesAndVersion(t *testing.T) {
 	}
 	closeOnCleanup(t, s)
 	bad := "CREATE TABLE should_rollback (id INTEGER); INSERT INTO nonexistent (id) VALUES (1);"
-	if err := applyMigration(s.DB(), 4, bad); err == nil {
+	if err := applyMigration(s.DB(), 5, bad); err == nil {
 		t.Fatal("bad migration succeeded")
 	}
 	var count int
@@ -109,11 +109,11 @@ func TestMigrationFailureRollsBackTablesAndVersion(t *testing.T) {
 	if count != 0 {
 		t.Fatal("failed migration left a table")
 	}
-	if err := s.DB().QueryRow("SELECT count(*) FROM schema_migrations WHERE version=4").Scan(&count); err != nil {
+	if err := s.DB().QueryRow("SELECT count(*) FROM schema_migrations WHERE version=5").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
-		t.Fatal("failed migration recorded version 4")
+		t.Fatal("failed migration recorded version 5")
 	}
 }
 
@@ -210,26 +210,26 @@ func TestNumberedMigrationsApplyInOrderAndRetryFailedVersion(t *testing.T) {
 	}
 	closeOnCleanup(t, s)
 	scripts := fstest.MapFS{
-		"migrations/0004_extra.sql": &fstest.MapFile{Data: []byte("CREATE TABLE extra (id INTEGER);")},
-		"migrations/0005_bad.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE partial (id INTEGER); INSERT INTO no_table VALUES (1);")},
+		"migrations/0005_extra.sql": &fstest.MapFile{Data: []byte("CREATE TABLE extra (id INTEGER);")},
+		"migrations/0006_bad.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE partial (id INTEGER); INSERT INTO no_table VALUES (1);")},
 	}
 	if err := migrate(s.DB(), scripts); err == nil {
-		t.Fatal("bad fifth migration succeeded")
+		t.Fatal("bad sixth migration succeeded")
 	}
 	var count int
 	if err := s.DB().QueryRow("SELECT count(*) FROM sqlite_master WHERE name='extra'").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {
-		t.Fatal("fourth migration did not apply")
+		t.Fatal("fifth migration did not apply")
 	}
 	if err := s.DB().QueryRow("SELECT count(*) FROM sqlite_master WHERE name='partial'").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
-		t.Fatal("fifth migration partially applied")
+		t.Fatal("sixth migration partially applied")
 	}
-	scripts["migrations/0005_bad.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE recovered (id INTEGER);")}
+	scripts["migrations/0006_bad.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE recovered (id INTEGER);")}
 	if err := migrate(s.DB(), scripts); err != nil {
 		t.Fatal(err)
 	}
@@ -239,8 +239,8 @@ func TestNumberedMigrationsApplyInOrderAndRetryFailedVersion(t *testing.T) {
 	if err := s.DB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 5 {
-		t.Fatalf("migration versions = %d, want 5", count)
+	if count != 6 {
+		t.Fatalf("migration versions = %d, want 6", count)
 	}
 }
 
@@ -316,6 +316,194 @@ func TestOpenPreservesSpecialFilename(t *testing.T) {
 	}
 	if version != 7 {
 		t.Fatalf("reopened user_version=%d, want 7", version)
+	}
+}
+
+func TestLabelsMigrationCreatesCohortTablesAndKeepsLegacyTables(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "hazard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeOnCleanup(t, s)
+	for _, name := range []string{"label_builds", "label_candidates", "label_candidate_members", "label_candidate_exclusions", "regressions", "excluded_labels"} {
+		var got string
+		if err := s.DB().QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", name).Scan(&got); err != nil {
+			t.Fatalf("missing table %s: %v", name, err)
+		}
+	}
+	var version int
+	if err := s.DB().QueryRow("SELECT version FROM schema_migrations WHERE version=4").Scan(&version); err != nil {
+		t.Fatalf("migration 4 not recorded: %v", err)
+	}
+	for _, legacy := range []string{
+		"INSERT INTO regressions(commit_sha,test_id,confidence,evidence) VALUES('sha','t','strong','{}')",
+		"INSERT INTO excluded_labels(commit_sha,test_id,reason) VALUES('sha','t','flaky')",
+	} {
+		if _, err := s.DB().Exec(legacy); err != nil {
+			t.Fatalf("legacy table changed: %s: %v", legacy, err)
+		}
+	}
+}
+
+const (
+	labelDigestA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	labelDigestB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+func insertLabelBuild(t *testing.T, s *Store, id string, current int) error {
+	t.Helper()
+	_, err := s.DB().Exec(`INSERT INTO label_builds(build_id,provider,project,cutoff,algorithm_version,input_digest,decision_digest,always_run_json,acquisition_exclusions_json,active_gaps,created_at,is_current)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, id, "github", "o/r", "2026-01-01T00:00:00Z", "labels/1", id, labelDigestB, "[]", "{}", 0, "2026-01-02T00:00:00Z", current)
+	return err
+}
+
+func TestLabelsMigrationConstraints(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "hazard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeOnCleanup(t, s)
+	db := s.DB()
+	if err := insertLabelBuild(t, s, labelDigestA, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertLabelBuild(t, s, labelDigestB, 1); err == nil {
+		t.Fatal("two current builds accepted")
+	}
+	if err := insertLabelBuild(t, s, labelDigestB, 0); err != nil {
+		t.Fatalf("non-current build rejected: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO label_builds(build_id,provider,project,cutoff,algorithm_version,input_digest,decision_digest,always_run_json,acquisition_exclusions_json,active_gaps,created_at,is_current)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,0)`, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "github", "o/r", "2026-01-01T00:00:00Z", "labels/1", labelDigestA, labelDigestB, "[]", "{}", 0, "x"); err == nil {
+		t.Fatal("duplicate semantic build key accepted")
+	}
+
+	candidate := func(key, kind, state string, members int) error {
+		_, err := db.Exec(`INSERT INTO label_candidates(build_id,candidate_key,kind,state,tested_sha,test_id,environment_id,branch,member_count,evidence_json)
+			VALUES(?,?,?,?,'sha','go:p:T','linux','main',?,'{}')`, labelDigestA, key, kind, state, members)
+		return err
+	}
+	if err := candidate("g1", "candidate", "strong", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := candidate("bad", "candidate", "maybe", 1); err == nil {
+		t.Error("invalid state accepted")
+	}
+	if err := candidate("bad", "other", "pending", 1); err == nil {
+		t.Error("invalid kind accepted")
+	}
+	if err := candidate("u1", "unresolved", "strong", 1); err == nil {
+		t.Error("unresolved record accepted as strong")
+	}
+	if err := candidate("u1", "unresolved", "weak", 1); err == nil {
+		t.Error("unresolved record accepted as weak")
+	}
+	if err := candidate("u1", "unresolved", "pending", 2); err == nil {
+		t.Error("unresolved record accepted with two members")
+	}
+	if err := candidate("u1", "unresolved", "excluded", 1); err != nil {
+		t.Errorf("unresolved excluded record rejected: %v", err)
+	}
+	if err := candidate("g2", "candidate", "pending", 0); err == nil {
+		t.Error("candidate without members accepted")
+	}
+	if _, err := db.Exec(`INSERT INTO label_candidates(build_id,candidate_key,kind,state,member_count,evidence_json)
+		VALUES(?,'noidentity','candidate','pending',1,'{}')`, labelDigestA); err == nil {
+		t.Error("known candidate accepted without tested sha, test id and environment")
+	}
+
+	member := func(build, key string, ordinal int) error {
+		_, err := db.Exec(`INSERT INTO label_candidate_members(build_id,provider,project,unit_key,content_sha256,artifact_entry,case_ordinal,candidate_key,status,observed_at,snapshot_json)
+			VALUES(?,'github','o/r','unit',?,'report.xml',?,?,'fail','2025-12-01T00:00:00Z','{}')`, build, labelDigestA, ordinal, key)
+		return err
+	}
+	if err := member(labelDigestA, "g1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := member(labelDigestA, "u1", 0); err == nil {
+		t.Error("raw observation joined two candidates in one build")
+	}
+	if err := member(labelDigestA, "missing", 1); err == nil {
+		t.Error("member of nonexistent candidate accepted")
+	}
+	if _, err := db.Exec(`INSERT INTO label_candidate_members(build_id,provider,project,unit_key,content_sha256,artifact_entry,case_ordinal,candidate_key,status,observed_at,snapshot_json)
+		VALUES(?,'github','o/r','unit',?,'report.xml',2,'g1','pass','2025-12-01T00:00:00Z','{}')`, labelDigestA, labelDigestA); err == nil {
+		t.Error("passing observation accepted as a failing member")
+	}
+
+	reason := func(effect, name string) error {
+		_, err := db.Exec(`INSERT INTO label_candidate_exclusions(build_id,candidate_key,reason,effect,evidence_json) VALUES(?,'g1',?,?,'[]')`, labelDigestA, name, effect)
+		return err
+	}
+	if err := reason("exclude", "infra"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reason("exclude", "infra"); err == nil {
+		t.Error("duplicate reason accepted for one candidate")
+	}
+	if err := reason("sometimes", "other"); err == nil {
+		t.Error("invalid effect accepted")
+	}
+	if err := reason("pending", ""); err == nil {
+		t.Error("empty reason accepted")
+	}
+}
+
+func TestLabelsMigrationRowsAreImmutableExceptCurrentMarker(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "hazard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeOnCleanup(t, s)
+	db := s.DB()
+	if err := insertLabelBuild(t, s, labelDigestA, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertLabelBuild(t, s, labelDigestB, 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`INSERT INTO label_candidates(build_id,candidate_key,kind,state,tested_sha,test_id,environment_id,member_count,evidence_json) VALUES('` + labelDigestA + `','g1','candidate','pending','sha','go:p:T','linux',1,'{}')`,
+		`INSERT INTO label_candidate_members(build_id,provider,project,unit_key,content_sha256,artifact_entry,case_ordinal,candidate_key,status,observed_at,snapshot_json) VALUES('` + labelDigestA + `','github','o/r','unit','` + labelDigestA + `','r.xml',0,'g1','fail','2025-12-01T00:00:00Z','{}')`,
+		`INSERT INTO label_candidate_exclusions(build_id,candidate_key,reason,effect,evidence_json) VALUES('` + labelDigestA + `','g1','infra','exclude','[]')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, statement := range []string{
+		"UPDATE label_candidates SET state='strong'",
+		"DELETE FROM label_candidates",
+		"UPDATE label_candidate_members SET candidate_key='g1', status='error'",
+		"DELETE FROM label_candidate_members",
+		"UPDATE label_candidate_exclusions SET effect='pending'",
+		"DELETE FROM label_candidate_exclusions",
+		"UPDATE label_builds SET decision_digest='" + labelDigestA + "' WHERE build_id='" + labelDigestA + "'",
+		"UPDATE label_builds SET cutoff='2027-01-01T00:00:00Z' WHERE build_id='" + labelDigestA + "'",
+		"DELETE FROM label_builds",
+	} {
+		if _, err := db.Exec(statement); err == nil {
+			t.Errorf("immutable row changed: %s", statement)
+		}
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		"UPDATE label_builds SET is_current=0 WHERE is_current=1",
+		"UPDATE label_builds SET is_current=1 WHERE build_id='" + labelDigestB + "'",
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			t.Fatalf("current marker flip rejected: %v", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var current string
+	if err := db.QueryRow("SELECT build_id FROM label_builds WHERE is_current=1").Scan(&current); err != nil || current != labelDigestB {
+		t.Fatalf("current build = %q, %v; want %q", current, err, labelDigestB)
 	}
 }
 
