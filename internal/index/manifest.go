@@ -106,6 +106,11 @@ func Build(ctx context.Context, repoDir string, cfg config.Config, opts Options)
 		}
 	}
 	m.Tests = tests
+	if opts.Coverage {
+		if err := addCoverage(ctx, root, python, cfg, m); err != nil {
+			return nil, err
+		}
+	}
 	m.CreatedAt = time.Now().UTC()
 	return m, nil
 }
