@@ -63,7 +63,7 @@ type ChangeSet struct {
 
 // Options selects the diff and the patterns Extract applies.
 type Options struct {
-	Base, Head, DefaultBranch        string
+	Base, Head, DefaultBranch         string
 	FullSuiteTriggers, GeneratedGlobs []string
 }
 
