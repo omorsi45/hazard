@@ -1,10 +1,17 @@
 package control
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"math"
 	"math/rand/v2"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 )
 
 // tableRisk returns a risk function backed by a lookup table that records
@@ -239,5 +246,338 @@ func TestLTTFalseCertificationRate(t *testing.T) {
 	// The check must not pass vacuously by refusing everything.
 	if certified < 900 {
 		t.Errorf("only %d of %d seeds certified any lambda: the test would pass by refusing", certified, seeds)
+	}
+}
+
+// Cross-implementation check (G10). The Go statistics are compared with the
+// independent Python module in research/ on one shared vectors file.
+
+type crossHB struct {
+	N     int     `json:"n"`
+	Rhat  float64 `json:"rhat"`
+	Alpha float64 `json:"alpha"`
+}
+
+type crossMinN struct {
+	Alpha float64 `json:"alpha"`
+	Delta float64 `json:"delta"`
+}
+
+type crossLTT struct {
+	N     int       `json:"n"`
+	Alpha float64   `json:"alpha"`
+	Delta float64   `json:"delta"`
+	Grid  []float64 `json:"grid"`
+	Risk  []float64 `json:"risk"`
+}
+
+type crossCP struct {
+	K          int     `json:"k"`
+	N          int     `json:"n"`
+	Confidence float64 `json:"confidence"`
+}
+
+type crossVectors struct {
+	HB   []crossHB   `json:"hb"`
+	MinN []crossMinN `json:"min_n"`
+	LTT  []crossLTT  `json:"ltt"`
+	CP   []crossCP   `json:"cp"`
+}
+
+type crossPoint struct {
+	Lambda   float64  `json:"lambda"`
+	Risk     float64  `json:"risk"`
+	P        *float64 `json:"p"`
+	Rejected bool     `json:"rejected"`
+}
+
+type crossResults struct {
+	HB []struct {
+		P *float64 `json:"p"`
+	} `json:"hb"`
+	MinN []struct {
+		N *int `json:"n"`
+	} `json:"min_n"`
+	LTT []struct {
+		Lambda  float64      `json:"lambda"`
+		Refused bool         `json:"refused"`
+		NeedN   *int         `json:"need_n"`
+		HaveN   int          `json:"have_n"`
+		Points  []crossPoint `json:"points"`
+	} `json:"ltt"`
+	CP []struct {
+		Upper float64 `json:"upper"`
+	} `json:"cp"`
+}
+
+// crossTolerance is the agreement required between the two implementations.
+const crossTolerance = 1e-9
+
+func crossHBVectors() []crossHB {
+	var out []crossHB
+	ns := []int{1, 2, 3, 5, 10, 25, 50, 100, 299, 300, 500, 1000, 2000, 5000, 20000, 100000, 200000}
+	alphas := []float64{0.001, 0.01, 0.05, 0.2}
+	// fractions of alpha: zero loss, interior, near alpha, at alpha, above alpha
+	fracs := []float64{0, 0.1, 0.5, 0.9, 0.99, 0.999999, 1, 1.5}
+	for _, n := range ns {
+		for _, a := range alphas {
+			for _, f := range fracs {
+				out = append(out, crossHB{N: n, Rhat: math.Min(a*f, 1), Alpha: a})
+			}
+			for _, f := range []float64{1 - 1e-9, 1 - 1e-12} { // just below alpha
+				out = append(out, crossHB{N: n, Rhat: a * f, Alpha: a})
+			}
+			if n >= 100 { // empirical rates k/n
+				for _, f := range []float64{0.3, 0.8, 0.97} {
+					k := math.Floor(float64(n) * a * f)
+					out = append(out, crossHB{N: n, Rhat: k / float64(n), Alpha: a})
+				}
+			}
+		}
+	}
+	return out
+}
+
+func crossLTTVectors(t *testing.T) []crossLTT {
+	t.Helper()
+	gridA, err := ParseGrid("0.005:0.5:0.005")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gridC, err := ParseGrid("0.01:0.9:0.01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rates := func(grid []float64, n int, misses func(lambda float64) float64) []float64 {
+		out := make([]float64, len(grid))
+		for i, l := range grid {
+			out[i] = misses(l) / float64(n)
+		}
+		return out
+	}
+	zeros := func(grid []float64) []float64 { return make([]float64, len(grid)) }
+	firstFails := zeros(gridA)
+	firstFails[0] = 0.02
+
+	return []crossLTT{
+		// certifies in the middle of the grid: misses grow as floor(40*lambda)
+		{N: 1000, Alpha: 0.01, Delta: 0.05, Grid: gridA, Risk: rates(gridA, 1000, func(l float64) float64 { return math.Floor(l * 40) })},
+		// below the minimum n: refuses even with zero loss
+		{N: 150, Alpha: 0.01, Delta: 0.05, Grid: gridA, Risk: zeros(gridA)},
+		// a different (alpha, delta) and a coarser, longer grid
+		{N: 5000, Alpha: 0.02, Delta: 0.1, Grid: gridC, Risk: rates(gridC, 5000, func(l float64) float64 { return math.Floor(l * 500) })},
+		// exactly the minimum n with zero loss: certifies the whole grid
+		{N: 299, Alpha: 0.01, Delta: 0.05, Grid: gridA, Risk: zeros(gridA)},
+		// enough samples but the most conservative lambda already misses too much
+		{N: 2000, Alpha: 0.01, Delta: 0.05, Grid: gridA, Risk: firstFails},
+	}
+}
+
+func crossMinNVectors() []crossMinN {
+	return []crossMinN{
+		{0.01, 0.05}, {0.05, 0.05}, {0.1, 0.1}, {0.02, 0.05}, {0.001, 0.05},
+		{0.05, 0.01}, {0.005, 0.1}, {0.2, 0.001}, {0.3, 0.05}, {0.0001, 0.05},
+	}
+}
+
+func crossCPVectors() []crossCP {
+	return []crossCP{
+		{0, 10, 0.95}, {1, 10, 0.95}, {3, 50, 0.9}, {5, 100, 0.99},
+		{0, 100, 0.95}, {20, 1000, 0.95}, {2, 30, 0.8}, {7, 7000, 0.999},
+	}
+}
+
+// findPython returns a working interpreter: HAZARD_TEST_PYTHON if set, else
+// python3, else python. With none, the test skips unless HAZARD_REQUIRE_PYTEST
+// is "1", in which case it fails.
+func findPython(t *testing.T) string {
+	t.Helper()
+	candidates := []string{"python3", "python"}
+	if p := os.Getenv("HAZARD_TEST_PYTHON"); p != "" {
+		candidates = []string{p}
+	}
+	for _, c := range candidates {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		err := exec.CommandContext(ctx, c, "-c", "import sys").Run()
+		cancel()
+		if err == nil {
+			return c
+		}
+	}
+	if os.Getenv("HAZARD_REQUIRE_PYTEST") == "1" {
+		t.Fatalf("no usable Python interpreter among %v and HAZARD_REQUIRE_PYTEST=1", candidates)
+	}
+	t.Skipf("no usable Python interpreter among %v", candidates)
+	return ""
+}
+
+func TestCrossImplementationAgainstPython(t *testing.T) {
+	py := findPython(t)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	researchDir := filepath.Join(wd, "..", "..", "research")
+	if st, err := os.Stat(filepath.Join(researchDir, "hazard_research", "ltt_check.py")); err != nil || st.IsDir() {
+		t.Fatalf("reference implementation missing under %s: %v", researchDir, err)
+	}
+
+	vectors := buildCrossVectors(t)
+	checkCrossCoverage(t, vectors.HB)
+
+	data, err := json.Marshal(vectors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "vectors.json")
+	if err := os.WriteFile(file, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, py, "-m", "hazard_research.ltt_check", "--vectors", file)
+	cmd.Dir = researchDir
+	cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1", "PYTHONIOENCODING=utf-8")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("python reference failed: %v\n%s", err, stderr.String())
+	}
+	var res crossResults
+	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+		t.Fatalf("python output is not the expected JSON: %v\n%.500s", err, stdout.String())
+	}
+	if len(res.HB) != len(vectors.HB) || len(res.MinN) != len(vectors.MinN) || len(res.LTT) != len(vectors.LTT) || len(res.CP) != len(vectors.CP) {
+		t.Fatalf("python returned %d/%d/%d/%d results for %d/%d/%d/%d vectors",
+			len(res.HB), len(res.MinN), len(res.LTT), len(res.CP), len(vectors.HB), len(vectors.MinN), len(vectors.LTT), len(vectors.CP))
+	}
+
+	maxDiff := 0.0
+	bad := 0
+	fail := func(format string, args ...any) {
+		bad++
+		if bad <= 12 {
+			t.Errorf(format, args...)
+		}
+	}
+	note := func(d float64) { maxDiff = math.Max(maxDiff, d) }
+
+	for i, v := range vectors.HB {
+		got := HBPValue(v.N, v.Rhat, v.Alpha)
+		want := res.HB[i].P
+		if want == nil || math.IsNaN(got) {
+			fail("hb[%d] %+v: go %v, python %v (NaN/null)", i, v, got, want)
+			continue
+		}
+		d := math.Abs(got - *want)
+		note(d)
+		if d > crossTolerance {
+			fail("hb[%d] %+v: go %.17g python %.17g differ by %.3g", i, v, got, *want, d)
+		}
+	}
+
+	for i, v := range vectors.MinN {
+		got := MinCalibrationN(v.Alpha, v.Delta)
+		if want := res.MinN[i].N; want == nil || *want != got {
+			fail("min_n[%d] %+v: go %d python %v", i, v, got, want)
+		}
+	}
+
+	certified, refused := 0, 0
+	for i, v := range vectors.LTT {
+		idx := make(map[float64]int, len(v.Grid))
+		for j, l := range v.Grid {
+			idx[l] = j
+		}
+		got := LTT(v.N, func(l float64) float64 { return v.Risk[idx[l]] }, v.Grid, v.Alpha, v.Delta)
+		want := res.LTT[i]
+		if got.Refused {
+			refused++
+		} else {
+			certified++
+		}
+		if got.Refused != want.Refused || got.Lambda != want.Lambda || got.HaveN != want.HaveN || want.NeedN == nil || got.NeedN != *want.NeedN {
+			fail("ltt[%d]: go {lambda %v refused %v need %d have %d} python {lambda %v refused %v need %v have %d}",
+				i, got.Lambda, got.Refused, got.NeedN, got.HaveN, want.Lambda, want.Refused, want.NeedN, want.HaveN)
+			continue
+		}
+		if len(got.Points) != len(want.Points) {
+			fail("ltt[%d]: go evaluated %d lambdas, python %d", i, len(got.Points), len(want.Points))
+			continue
+		}
+		for j, gp := range got.Points {
+			wp := want.Points[j]
+			if wp.P == nil || gp.Lambda != wp.Lambda || gp.Risk != wp.Risk || gp.Rejected != wp.Rejected {
+				fail("ltt[%d] point %d: go %+v python %+v", i, j, gp, wp)
+				continue
+			}
+			d := math.Abs(gp.PValue - *wp.P)
+			note(d)
+			if d > crossTolerance {
+				fail("ltt[%d] point %d (lambda %v): go p %.17g python p %.17g differ by %.3g", i, j, gp.Lambda, gp.PValue, *wp.P, d)
+			}
+		}
+	}
+	if certified < 3 || refused < 2 {
+		t.Errorf("LTT vectors cover %d certified and %d refused grids, want at least 3 and 2", certified, refused)
+	}
+
+	for i, v := range vectors.CP {
+		got := ClopperPearsonUpper(v.K, v.N, v.Confidence)
+		d := math.Abs(got - res.CP[i].Upper)
+		note(d)
+		if d > crossTolerance {
+			fail("cp[%d] %+v: go %.17g python %.17g differ by %.3g", i, v, got, res.CP[i].Upper, d)
+		}
+	}
+
+	t.Logf("compared %d hb, %d min_n, %d ltt grids, %d cp vectors; max |go-python| = %.3g (tolerance %g)",
+		len(vectors.HB), len(vectors.MinN), len(vectors.LTT), len(vectors.CP), maxDiff, crossTolerance)
+	if bad > 12 {
+		t.Errorf("... and %d more disagreements", bad-12)
+	}
+}
+
+func buildCrossVectors(t *testing.T) crossVectors {
+	t.Helper()
+	return crossVectors{HB: crossHBVectors(), MinN: crossMinNVectors(), LTT: crossLTTVectors(t), CP: crossCPVectors()}
+}
+
+// checkCrossCoverage makes sure the vectors exercise both branches of the
+// minimum and a wide range of n, so agreement is not trivial.
+func checkCrossCoverage(t *testing.T, hb []crossHB) {
+	t.Helper()
+	if len(hb) < 60 {
+		t.Fatalf("only %d hb vectors, want at least 60", len(hb))
+	}
+	expWins, binomWins, interior, zeroLoss, nearAlpha := 0, 0, 0, 0, 0
+	minN, maxN := math.MaxInt, 0
+	for _, v := range hb {
+		minN, maxN = min(minN, v.N), max(maxN, v.N)
+		if v.Rhat == 0 {
+			zeroLoss++
+		}
+		if v.Rhat >= v.Alpha {
+			continue
+		}
+		if v.Rhat > 0.999*v.Alpha {
+			nearAlpha++
+		}
+		chernoff, binom := hbTerms(v.N, v.Rhat, v.Alpha)
+		p := HBPValue(v.N, v.Rhat, v.Alpha)
+		if p > 1e-6 && p < 1-1e-6 {
+			interior++
+			if chernoff < binom {
+				expWins++
+			} else {
+				binomWins++
+			}
+		}
+	}
+	if expWins < 10 || binomWins < 10 {
+		t.Errorf("interior vectors where the exp branch is the minimum: %d, the binomial branch: %d; want at least 10 of each", expWins, binomWins)
+	}
+	if interior < 50 || zeroLoss == 0 || nearAlpha == 0 || minN != 1 || maxN < 200000 {
+		t.Errorf("coverage too thin: interior %d, zero-loss %d, near-alpha %d, n in [%d, %d]", interior, zeroLoss, nearAlpha, minN, maxN)
 	}
 }
