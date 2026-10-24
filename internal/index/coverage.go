@@ -24,6 +24,17 @@ func addCoverage(ctx context.Context, root, python string, cfg config.Config, m 
 			parts = append(parts, res.Coverage)
 		}
 	}
+	if cfg.Languages.Python.Enabled {
+		res, err := collectPythonCoverage(ctx, root, python, cfg, m)
+		m.Commands = append(m.Commands, res.Commands...)
+		m.Diagnostics = append(m.Diagnostics, res.Diagnostics...)
+		if err != nil {
+			return err
+		}
+		if res.Coverage != nil {
+			parts = append(parts, res.Coverage)
+		}
+	}
 	m.Coverage = mergeCoverage(m, parts)
 	return nil
 }
