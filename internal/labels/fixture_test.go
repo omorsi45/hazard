@@ -80,13 +80,6 @@ func ps(shas ...string) string {
 	return out + "]"
 }
 
-func textOrNil(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
 // obs inserts one artifact with one case and returns its raw unit key.
 func (f *fixture) obs(s spec) string {
 	f.t.Helper()
