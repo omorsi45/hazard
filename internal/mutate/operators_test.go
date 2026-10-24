@@ -260,7 +260,9 @@ func TestOperatorSelection(t *testing.T) {
 	checkMutants(t, src, []string{"logic"}, []spot{wrapSpot, andSpot})
 	checkMutants(t, src, []string{"cmp", "logic"}, []spot{wrapSpot, cmpSpot, andSpot})
 	checkMutants(t, src, []string{"logic", "cmp"}, []spot{wrapSpot, cmpSpot, andSpot})
-	checkMutants(t, src, []string{"const", "ret", "stmt"}, nil)
+	checkMutants(t, src, []string{"const", "ret", "stmt"}, []spot{
+		{ctx: "x()", within: "x()", op: "stmt", orig: "x()", mut: "", line: 5},
+	})
 	checkMutants(t, src, nil, nil)
 	checkMutants(t, src, []string{}, nil)
 	// cfg is produced by ConfigMutants, never by GoMutants.
@@ -352,4 +354,383 @@ func TestGoMutantsDeterministic(t *testing.T) {
 			}
 		}
 	}
+}
+
+// pkg builds a file whose first declaration starts on line 3.
+func pkg(decls string) string { return "package p\n\n" + decls + "\n" }
+
+func TestConstInt(t *testing.T) {
+	for _, tc := range []struct {
+		lit  string
+		muts []string
+	}{
+		{"5", []string{"6", "4", "0"}},
+		{"0", []string{"1", "-1"}},
+		{"1", []string{"2", "0"}}, // n-1 and 0 coincide: one mutant
+		{"42", []string{"43", "41", "0"}},
+		{"123456789012345678901234567890", []string{"123456789012345678901234567891", "123456789012345678901234567889", "0"}},
+		{"9223372036854775807", []string{"9223372036854775808", "9223372036854775806", "0"}},
+	} {
+		t.Run(tc.lit, func(t *testing.T) {
+			var spots []spot
+			for _, m := range tc.muts {
+				spots = append(spots, spot{ctx: "x := " + tc.lit, within: tc.lit, op: "const", orig: tc.lit, mut: m, line: 4})
+			}
+			checkMutants(t, body("x := "+tc.lit), []string{"const"}, spots)
+		})
+	}
+}
+
+func TestConstUnaryMinus(t *testing.T) {
+	checkMutants(t, body("x := -5"), []string{"const"}, []spot{
+		{ctx: "-5", within: "5", op: "const", orig: "5", mut: "6", line: 4},
+		{ctx: "-5", within: "5", op: "const", orig: "5", mut: "4", line: 4},
+		{ctx: "-5", within: "5", op: "const", orig: "5", mut: "0", line: 4},
+	})
+}
+
+func TestConstIgnoresNonDecimalLiterals(t *testing.T) {
+	for _, lit := range []string{"0x10", "0X1F", "0755", "0b11", "0o17", "1_000", "1.5", ".5", "1e3", "2i", "'a'", "00"} {
+		t.Run(lit, func(t *testing.T) {
+			checkMutants(t, body("x := "+lit), []string{"const"}, nil)
+		})
+	}
+}
+
+func TestConstString(t *testing.T) {
+	for _, lit := range []string{
+		`"hello"`,
+		"`raw`",
+		`"a\"b\n"`,
+		"\"h\u00e9llo \u2713\"",
+		`" "`,
+	} {
+		t.Run(lit, func(t *testing.T) {
+			checkMutants(t, body("x := "+lit), []string{"const"}, []spot{
+				{ctx: "x := " + lit, within: lit, op: "const", orig: lit, mut: `""`, line: 4},
+			})
+		})
+	}
+	for _, lit := range []string{`""`, "``"} {
+		t.Run("empty "+lit, func(t *testing.T) {
+			checkMutants(t, body("x := "+lit), []string{"const"}, nil)
+		})
+	}
+}
+
+func TestConstSkipsDeclarationsTagsAndImports(t *testing.T) {
+	src := `package p
+
+import "fmt"
+import (
+	"os"
+	_ "embed"
+)
+
+type T struct {
+	A int ` + "`json:\"a\"`" + `
+	B string "plain tag"
+}
+
+const (
+	name = "n"
+	size = 8
+	limit = 10
+)
+
+const lone = "l"
+
+var buf [size]byte
+var arr [4]int
+var expr [2 * 8]int
+`
+	checkMutants(t, src, []string{"const"}, []spot{
+		{ctx: "limit = 10", within: "10", op: "const", orig: "10", mut: "11", line: 17},
+		{ctx: "limit = 10", within: "10", op: "const", orig: "10", mut: "9", line: 17},
+		{ctx: "limit = 10", within: "10", op: "const", orig: "10", mut: "0", line: 17},
+	})
+}
+
+func TestConstArrayElementsAreMutatedButLengthIsNot(t *testing.T) {
+	checkMutants(t, body("var x [4]int\n\ty := [...]int{7}"), []string{"const"}, []spot{
+		{ctx: "{7}", within: "7", op: "const", orig: "7", mut: "8", line: 5},
+		{ctx: "{7}", within: "7", op: "const", orig: "7", mut: "6", line: 5},
+		{ctx: "{7}", within: "7", op: "const", orig: "7", mut: "0", line: 5},
+	})
+}
+
+func TestConstLocalConstants(t *testing.T) {
+	checkMutants(t, body("const s = \"v\"\n\tconst n = 3"), []string{"const"}, []spot{
+		{ctx: "n = 3", within: "3", op: "const", orig: "3", mut: "4", line: 5},
+		{ctx: "n = 3", within: "3", op: "const", orig: "3", mut: "2", line: 5},
+		{ctx: "n = 3", within: "3", op: "const", orig: "3", mut: "0", line: 5},
+	})
+}
+
+func TestConstRawStringsAndLineNumbers(t *testing.T) {
+	src := body("s := `one\ntwo`\n\tn := 3")
+	checkMutants(t, src, []string{"const"}, []spot{
+		{ctx: "`one\ntwo`", within: "`one\ntwo`", op: "const", orig: "`one\ntwo`", mut: `""`, line: 4},
+		{ctx: "n := 3", within: "3", op: "const", orig: "3", mut: "4", line: 6},
+		{ctx: "n := 3", within: "3", op: "const", orig: "3", mut: "2", line: 6},
+		{ctx: "n := 3", within: "3", op: "const", orig: "3", mut: "0", line: 6},
+	})
+}
+
+func TestConstRawStringWithCRLF(t *testing.T) {
+	// The parser drops carriage returns from a raw string's value; the mutant
+	// must still cover the exact bytes of the file.
+	src := "package p\r\n\r\nfunc f() {\r\n\ts := `a\r\nb`\r\n\tn := 3\r\n}\r\n"
+	checkMutants(t, src, []string{"const"}, []spot{
+		{ctx: "`a\r\nb`", within: "`a\r\nb`", op: "const", orig: "`a\r\nb`", mut: `""`, line: 4},
+		{ctx: "n := 3", within: "3", op: "const", orig: "3", mut: "4", line: 6},
+		{ctx: "n := 3", within: "3", op: "const", orig: "3", mut: "2", line: 6},
+		{ctx: "n := 3", within: "3", op: "const", orig: "3", mut: "0", line: 6},
+	})
+}
+
+func TestParseFilterDropsMutantsThatBreakSyntax(t *testing.T) {
+	// "a-0" -> "a--1" is an increment followed by a stray literal: the
+	// candidate must be discarded, the valid "a-1" kept.
+	checkMutants(t, body("x := a-0"), []string{"const"}, []spot{
+		{ctx: "a-0", within: "0", op: "const", orig: "0", mut: "1", line: 4},
+	})
+}
+
+func TestRetZeroValues(t *testing.T) {
+	cases := []struct{ name, typ, zero string }{
+		{"bool", "bool", "false"},
+		{"string", "string", `""`},
+		{"error", "error", "nil"},
+		{"pointer", "*T", "nil"},
+		{"slice", "[]int", "nil"},
+		{"map", "map[string]int", "nil"},
+		{"chan", "chan int", "nil"},
+		{"receive chan", "<-chan int", "nil"},
+		{"func", "func()", "nil"},
+		{"empty interface", "interface{}", "nil"},
+		{"method interface", "interface{ M() }", "nil"},
+		{"any", "any", "nil"},
+	}
+	for _, n := range []string{"int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "float32", "float64", "complex64", "complex128", "byte", "rune"} {
+		cases = append(cases, struct{ name, typ, zero string }{n, n, "0"})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			checkMutants(t, pkg("func f() "+tc.typ+" {\n\treturn x\n}"), []string{"ret"}, []spot{
+				{ctx: "return x", within: "x", op: "ret", orig: "x", mut: tc.zero, line: 4},
+			})
+		})
+	}
+}
+
+func TestRetMultipleResults(t *testing.T) {
+	t.Run("value and error", func(t *testing.T) {
+		checkMutants(t, pkg("func f() (int, error) {\n\treturn a, err\n}"), []string{"ret"}, []spot{
+			{ctx: "return a, err", within: "a", op: "ret", orig: "a", mut: "0", line: 4},
+			{ctx: "return a, err", within: "err", op: "ret", orig: "err", mut: "nil", line: 4},
+		})
+	})
+	t.Run("nil error is already zero", func(t *testing.T) {
+		checkMutants(t, pkg("func f() (int, error) {\n\treturn a, nil\n}"), []string{"ret"}, []spot{
+			{ctx: "return a, nil", within: "a", op: "ret", orig: "a", mut: "0", line: 4},
+		})
+	})
+	t.Run("zero value is already zero", func(t *testing.T) {
+		checkMutants(t, pkg("func f() (int, error) {\n\treturn 0, err\n}"), []string{"ret"}, []spot{
+			{ctx: "return 0, err", within: "err", op: "ret", orig: "err", mut: "nil", line: 4},
+		})
+	})
+	t.Run("grouped names", func(t *testing.T) {
+		checkMutants(t, pkg("func f() (x, y int, s string) {\n\treturn 1, 2, \"z\"\n}"), []string{"ret"}, []spot{
+			{ctx: `return 1, 2, "z"`, within: "1", op: "ret", orig: "1", mut: "0", line: 4},
+			{ctx: `return 1, 2, "z"`, within: "2", op: "ret", orig: "2", mut: "0", line: 4},
+			{ctx: `return 1, 2, "z"`, within: `"z"`, op: "ret", orig: `"z"`, mut: `""`, line: 4},
+		})
+	})
+	t.Run("tuple call", func(t *testing.T) {
+		checkMutants(t, pkg("func f() (int, error) {\n\treturn g()\n}"), []string{"ret"}, nil)
+	})
+	t.Run("bare return with named results", func(t *testing.T) {
+		checkMutants(t, pkg("func f() (n int, err error) {\n\tn = 1\n\treturn\n}"), []string{"ret"}, nil)
+	})
+	t.Run("explicit return with named results", func(t *testing.T) {
+		checkMutants(t, pkg("func f() (n int, err error) {\n\treturn 2, e\n}"), []string{"ret"}, []spot{
+			{ctx: "return 2, e", within: "2", op: "ret", orig: "2", mut: "0", line: 4},
+			{ctx: "return 2, e", within: "e", nth: 1, op: "ret", orig: "e", mut: "nil", line: 4},
+		})
+	})
+}
+
+func TestRetSkipsIneligibleResultTypes(t *testing.T) {
+	for _, tc := range []struct{ name, results, ret string }{
+		{"struct", "T", "x"},
+		{"empty struct", "struct{}", "x"},
+		{"array", "[3]int", "x"},
+		{"qualified type", "time.Duration", "x"},
+		{"named type", "Kind", "x"},
+		{"one ineligible among eligible", "(int, T)", "x, y"},
+		{"ineligible first", "(T, error)", "x, y"},
+		{"array of pointers", "[N]*int", "x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkMutants(t, pkg("func f() "+tc.results+" {\n\treturn "+tc.ret+"\n}"), []string{"ret"}, nil)
+		})
+	}
+	t.Run("type parameter", func(t *testing.T) {
+		checkMutants(t, pkg("func f[T any]() T {\n\tvar z T\n\treturn z\n}"), []string{"ret"}, nil)
+	})
+	t.Run("no results", func(t *testing.T) {
+		checkMutants(t, pkg("func f() {\n\treturn\n}"), []string{"ret"}, nil)
+	})
+}
+
+func TestRetMethodsAndAlreadyZeroValues(t *testing.T) {
+	checkMutants(t, pkg("type S struct{}\n\nfunc (s S) f() int {\n\treturn 1\n}"), []string{"ret"}, []spot{
+		{ctx: "return 1", within: "1", op: "ret", orig: "1", mut: "0", line: 6},
+	})
+	for _, tc := range []struct{ typ, expr string }{
+		{"int", "0"},
+		{"int", "0x0"},
+		{"float64", "0.0"},
+		{"bool", "false"},
+		{"string", `""`},
+		{"string", "``"},
+		{"error", "nil"},
+		{"error", "(nil)"},
+		{"*T", "nil"},
+	} {
+		t.Run(tc.typ+" "+tc.expr, func(t *testing.T) {
+			checkMutants(t, pkg("func f() "+tc.typ+" {\n\treturn "+tc.expr+"\n}"), []string{"ret"}, nil)
+		})
+	}
+}
+
+func TestRetFunctionLiteralsAreScoped(t *testing.T) {
+	t.Run("inner returns belong to the literal", func(t *testing.T) {
+		src := pkg("func outer() string {\n\tg := func() int {\n\t\treturn 7\n\t}\n\treturn \"s\" + g2()\n}")
+		checkMutants(t, src, []string{"ret"}, []spot{
+			{ctx: "return 7", within: "7", op: "ret", orig: "7", mut: "0", line: 5},
+			{ctx: `return "s" + g2()`, within: `"s" + g2()`, op: "ret", orig: `"s" + g2()`, mut: `""`, line: 7},
+		})
+	})
+	t.Run("ineligible literal inside eligible function", func(t *testing.T) {
+		src := pkg("func outer() int {\n\th := func() T {\n\t\treturn T{}\n\t}\n\treturn 1\n}")
+		checkMutants(t, src, []string{"ret"}, []spot{
+			{ctx: "return 1", within: "1", op: "ret", orig: "1", mut: "0", line: 7},
+		})
+	})
+	t.Run("literal assigned at package level", func(t *testing.T) {
+		checkMutants(t, pkg("var g = func() bool {\n\treturn ok\n}"), []string{"ret"}, []spot{
+			{ctx: "return ok", within: "ok", op: "ret", orig: "ok", mut: "false", line: 4},
+		})
+	})
+}
+
+func TestRetNestedReturnsAndMultiLineExpressions(t *testing.T) {
+	src := pkg("func f() int {\n\tif ok {\n\t\treturn 1\n\t}\n\tswitch {\n\tcase ok:\n\t\treturn 2\n\t}\n\treturn 3\n}")
+	checkMutants(t, src, []string{"ret"}, []spot{
+		{ctx: "return 1", within: "1", op: "ret", orig: "1", mut: "0", line: 5},
+		{ctx: "return 2", within: "2", op: "ret", orig: "2", mut: "0", line: 9},
+		{ctx: "return 3", within: "3", op: "ret", orig: "3", mut: "0", line: 11},
+	})
+	checkMutants(t, pkg("func f() int {\n\treturn a +\n\t\tb\n}"), []string{"ret"}, []spot{
+		{ctx: "return a +\n\t\tb", within: "a +\n\t\tb", op: "ret", orig: "a +\n\t\tb", mut: "0", line: 4},
+	})
+}
+
+func TestConstAndRetAtTheSameOffsetAreOrderedByOperator(t *testing.T) {
+	checkMutants(t, pkg("func f() int {\n\treturn 5\n}"), []string{"const", "ret"}, []spot{
+		{ctx: "return 5", within: "5", op: "const", orig: "5", mut: "0", line: 4},
+		{ctx: "return 5", within: "5", op: "const", orig: "5", mut: "4", line: 4},
+		{ctx: "return 5", within: "5", op: "const", orig: "5", mut: "6", line: 4},
+		{ctx: "return 5", within: "5", op: "ret", orig: "5", mut: "0", line: 4},
+	})
+}
+
+func TestStmtDeletesCallsIncDecAndPlainAssignments(t *testing.T) {
+	stmts := []string{"x()", "c++", "d--", "a = 1", "a, b = b, a", "m[k] = true", "s.f = c", "*p = 3", "obj.method(a, b)"}
+	var spots []spot
+	for i, s := range stmts {
+		spots = append(spots, spot{ctx: s, within: s, op: "stmt", orig: s, mut: "", line: 4 + i})
+	}
+	checkMutants(t, body(strings.Join(stmts, "\n\t")), []string{"stmt"}, spots)
+}
+
+func TestStmtNeverDeletesOtherStatements(t *testing.T) {
+	src := body(`v := 1
+	var w int
+	c += 1
+	c -= 1
+	defer x()
+	go y()
+	ch <- 1
+	<-ch
+	if ok {
+	}
+	for {
+		break
+	}
+	switch {
+	case ok:
+		fallthrough
+	default:
+	}
+L:
+	for {
+		continue L
+	}
+M:
+	z()
+	goto L`)
+	checkMutants(t, src, []string{"stmt"}, nil)
+}
+
+func TestStmtSameLine(t *testing.T) {
+	checkMutants(t, body("x(); y()"), []string{"stmt"}, []spot{
+		{ctx: "x(); y()", within: "x()", op: "stmt", orig: "x()", mut: "", line: 4},
+		{ctx: "x(); y()", within: "y()", op: "stmt", orig: "y()", mut: "", line: 4},
+	})
+}
+
+func TestStmtMultiLineAndTrailingComment(t *testing.T) {
+	checkMutants(t, body("x(a,\n\t\tb)\n\ty() // note"), []string{"stmt"}, []spot{
+		{ctx: "x(a,\n\t\tb)", within: "x(a,\n\t\tb)", op: "stmt", orig: "x(a,\n\t\tb)", mut: "", line: 4},
+		{ctx: "y()", within: "y()", op: "stmt", orig: "y()", mut: "", line: 6},
+	})
+}
+
+func TestStmtKeepsTheLastStatementOfFunctionsWithResults(t *testing.T) {
+	t.Run("declaration and literal", func(t *testing.T) {
+		src := pkg("func f() int {\n\tx()\n\tpanic(\"no\")\n}\n\nvar g = func() int {\n\ty()\n\tpanic(\"z\")\n}")
+		checkMutants(t, src, []string{"stmt"}, []spot{
+			{ctx: "x()", within: "x()", op: "stmt", orig: "x()", mut: "", line: 4},
+			{ctx: "y()", within: "y()", op: "stmt", orig: "y()", mut: "", line: 9},
+		})
+	})
+	t.Run("assignment as last statement", func(t *testing.T) {
+		checkMutants(t, pkg("func f() (n int) {\n\tx()\n\tn = 1\n}"), []string{"stmt"}, []spot{
+			{ctx: "x()", within: "x()", op: "stmt", orig: "x()", mut: "", line: 4},
+		})
+	})
+	t.Run("no results", func(t *testing.T) {
+		checkMutants(t, pkg("func f() {\n\tx()\n\ty()\n}"), []string{"stmt"}, []spot{
+			{ctx: "x()", within: "x()", op: "stmt", orig: "x()", mut: "", line: 4},
+			{ctx: "y()", within: "y()", op: "stmt", orig: "y()", mut: "", line: 5},
+		})
+	})
+	t.Run("last statement of a nested block", func(t *testing.T) {
+		checkMutants(t, pkg("func f() int {\n\tif ok {\n\t\tx()\n\t}\n\treturn 1\n}"), []string{"stmt"}, []spot{
+			{ctx: "x()", within: "x()", op: "stmt", orig: "x()", mut: "", line: 5},
+		})
+	})
+}
+
+func TestStmtInCaseClauses(t *testing.T) {
+	src := pkg("func f() {\n\tswitch k {\n\tcase \"a\":\n\t\tx()\n\tdefault:\n\t\ty()\n\t}\n\tselect {\n\tcase <-ch:\n\t\tz()\n\t}\n}")
+	checkMutants(t, src, []string{"stmt"}, []spot{
+		{ctx: "x()", within: "x()", op: "stmt", orig: "x()", mut: "", line: 6},
+		{ctx: "y()", within: "y()", op: "stmt", orig: "y()", mut: "", line: 8},
+		{ctx: "z()", within: "z()", op: "stmt", orig: "z()", mut: "", line: 12},
+	})
 }
