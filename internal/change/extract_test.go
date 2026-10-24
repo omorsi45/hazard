@@ -163,6 +163,7 @@ func buildWorldA() (*history, string) {
 		put("go/pure_old.go", "package pure\n\nfunc Same() int { return 1 }\n"),
 		put("go/broken_head.go", goBase),
 		put("go/broken_base.go", broken),
+		put("go/broken_base_insert.go", strings.TrimSuffix(goBase, "}\n")), // missing the final brace
 		put("go/after_broken.go", goBase),
 		put("kinds/gen_header.go", generated),
 		put("kinds/api.pb.go", "package gen\n"),
@@ -191,6 +192,7 @@ func buildWorldA() (*history, string) {
 		rename("go/pure_old.go", "go/pure_new.go"),
 		put("go/broken_head.go", broken),
 		put("go/broken_base.go", goBase),
+		put("go/broken_base_insert.go", goBase),
 		put("go/after_broken.go", edited),
 		put("kinds/gen_header.go", generated+"\nfunc G() {}\n"),
 		put("kinds/api.pb.go", "package gen\n\nvar A = 1\n"),
@@ -231,7 +233,7 @@ func TestExtractCommittedRange(t *testing.T) {
 	wantPaths(t, cs,
 		"--output=x.go", "-rf.go", "bin/logo.bin", "dir with space/héllo wörld.go",
 		"docs/README.md", "docs/guide.md",
-		"go/added.go", "go/after_broken.go", "go/broken_base.go", "go/broken_head.go", "go/deleted_func.go",
+		"go/added.go", "go/after_broken.go", "go/broken_base.go", "go/broken_base_insert.go", "go/broken_head.go", "go/deleted_func.go",
 		"go/ins_blank.go", "go/ins_body.go", "go/ins_boundary.go", "go/ins_import.go", "go/ins_top.go",
 		"go/modified.go", "go/pkg/rename_new.go", "go/pure_new.go", "go/removed.go",
 		"kinds/a_test.go", "kinds/api.pb.go", "kinds/config.yaml", "kinds/gen_header.go", "kinds/go.sum",
@@ -294,6 +296,9 @@ func TestExtractCommittedRange(t *testing.T) {
 		want := hunk(7, 1, 7, 1, "Alpha", "__file__")
 		wantHunks(t, fileOf(t, cs, "go/broken_head.go"), want)
 		wantHunks(t, fileOf(t, cs, "go/broken_base.go"), want)
+		// A pure insertion consults the base only for the declaration holding the
+		// line it follows; an unparsable base must still widen it to the file.
+		wantHunks(t, fileOf(t, cs, "go/broken_base_insert.go"), hunk(17, 0, 18, 1, "(*Gamma).Run", "__file__"))
 		wantHunks(t, fileOf(t, cs, "go/after_broken.go"), hunk(7, 1, 7, 1, "Alpha"))
 	})
 	t.Run("python", func(t *testing.T) {

@@ -186,6 +186,28 @@ func TestParseStatus(t *testing.T) {
 	}
 }
 
+func TestIsOID(t *testing.T) {
+	t.Parallel()
+	valid := []string{
+		strings.Repeat("a", 40), strings.Repeat("0", 40), strings.Repeat("F", 40), // SHA-1, any hex case
+		strings.Repeat("1", 64), // SHA-256
+	}
+	for _, s := range valid {
+		if !isOID(s) {
+			t.Errorf("isOID(%q) = false, want true", s)
+		}
+	}
+	invalid := []string{
+		"", "HEAD", strings.Repeat("a", 39), strings.Repeat("a", 41), strings.Repeat("a", 63),
+		strings.Repeat("g", 40), "--output=x^{commit}", strings.Repeat("a", 39) + "\n",
+	}
+	for _, s := range invalid {
+		if isOID(s) {
+			t.Errorf("isOID(%q) = true, want false", s)
+		}
+	}
+}
+
 func TestAttribute(t *testing.T) {
 	t.Parallel()
 	iv, err := GoSymbols([]byte(goBase))

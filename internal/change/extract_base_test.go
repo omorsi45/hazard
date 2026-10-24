@@ -137,8 +137,13 @@ func TestExtractExplicitRefs(t *testing.T) {
 		} {
 			opts := testOptions()
 			opts.Base, opts.Head = tc.base, tc.head
-			if cs, err := Extract(context.Background(), r.dir, opts); err == nil {
+			cs, err := Extract(context.Background(), r.dir, opts)
+			if err == nil {
 				t.Fatalf("%s: Extract accepted an option-like ref: %+v", tc.name, cs)
+			}
+			// Refused up front, before any git process could read it as an option.
+			if !strings.Contains(err.Error(), "must not start with '-'") {
+				t.Errorf("%s: error = %v, want the up-front refusal", tc.name, err)
 			}
 			if _, err := os.Stat(victim); err == nil {
 				t.Fatalf("%s: git wrote the file named by an option-like ref", tc.name)

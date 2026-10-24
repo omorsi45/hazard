@@ -181,8 +181,14 @@ func resolveRefs(ctx context.Context, repoDir string, opts Options) (root, index
 	if !filepath.IsAbs(indexPath) {
 		indexPath = filepath.Join(repoDir, indexPath)
 	}
+	if !isOID(headSHA) {
+		return "", "", false, "", "", fmt.Errorf("git rev-parse resolved %q to %q, want an object name", headRev, headSHA)
+	}
 	if opts.Base != "" {
 		baseSHA = lines[4]
+		if !isOID(baseSHA) {
+			return "", "", false, "", "", fmt.Errorf("git rev-parse resolved %q to %q, want an object name", opts.Base, baseSHA)
+		}
 	}
 	return root, indexPath, shallow, headSHA, baseSHA, nil
 }
@@ -274,6 +280,19 @@ func langOf(path string) string {
 func isRegularMode(mode string) bool { return mode == "100644" || mode == "100755" }
 
 func isZeroOID(oid string) bool { return strings.Trim(oid, "0") == "" }
+
+// isOID reports whether s is a full SHA-1 or SHA-256 object name.
+func isOID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
 
 func buildFiles(ctx context.Context, root string, entries []diffEntry, untracked []string, workTree bool, opts Options) ([]ChangedFile, error) {
 	var works []*work
