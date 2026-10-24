@@ -56,6 +56,7 @@ class TestC:
 `
 
 func TestDiscoverPythonCollectsAndMapsIdentities(t *testing.T) {
+	t.Parallel()
 	python := testPython(t, "pytest")
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{"tests/test_x.py": discoverPyTests})
@@ -95,6 +96,7 @@ func TestDiscoverPythonCollectsAndMapsIdentities(t *testing.T) {
 }
 
 func TestDiscoverPythonNoTestsIsNotAnError(t *testing.T) {
+	t.Parallel()
 	python := testPython(t, "pytest")
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{"tests/helper.py": "VALUE = 1\n"})
@@ -105,6 +107,7 @@ func TestDiscoverPythonNoTestsIsNotAnError(t *testing.T) {
 }
 
 func TestDiscoverPythonFailuresAreErrors(t *testing.T) {
+	t.Parallel()
 	python := testPython(t, "pytest")
 	for name, files := range map[string]map[string]string{
 		"collection error":  {"tests/test_bad.py": "import module_that_does_not_exist_xyz\n"},
@@ -112,6 +115,7 @@ func TestDiscoverPythonFailuresAreErrors(t *testing.T) {
 		"unknown test path": {"other/test_x.py": "def test_a():\n    pass\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			writeFiles(t, dir, files)
 			paths := []string{"tests"}
@@ -126,6 +130,7 @@ func TestDiscoverPythonFailuresAreErrors(t *testing.T) {
 }
 
 func TestDiscoverPythonCanceledContext(t *testing.T) {
+	t.Parallel()
 	python := testPython(t, "pytest")
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{"tests/test_x.py": "def test_a():\n    pass\n"})

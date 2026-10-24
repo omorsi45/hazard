@@ -113,6 +113,7 @@ func discoverGraph() *graph.Graph {
 }
 
 func TestDiscoverGo(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{
 		"p/p_test.go":      discoverMain,
@@ -178,6 +179,7 @@ func TestDiscoverGo(t *testing.T) {
 }
 
 func TestDiscoverGoSyntaxErrorFails(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{"p/p_test.go": "package p\n\nfunc TestBroken( {\n"})
 	g := &graph.Graph{Packages: map[string]*graph.Package{
