@@ -63,3 +63,45 @@ func markJUnitInstability(identity TestIdentity, rawName string) TestIdentity {
 	}
 	return identity
 }
+
+// PythonIdentityFromNodeID maps a pytest node ID such as
+// "tests/test_x.py::Class::test_a[p]" to a history identity.
+func PythonIdentityFromNodeID(nodeID string) (TestIdentity, error) {
+	invalid := func(reason string) (TestIdentity, error) {
+		return TestIdentity{}, &IdentityError{Reason: reason}
+	}
+	if !utf8.ValidString(nodeID) || strings.IndexFunc(nodeID, unicode.IsControl) >= 0 {
+		return invalid("malformed Python node ID")
+	}
+	head, params := nodeID, ""
+	if i := strings.IndexByte(nodeID, '['); i >= 0 {
+		head, params = nodeID[:i], nodeID[i:]
+	}
+	parts := strings.Split(head, "::")
+	if len(parts) < 2 {
+		return invalid("Python node ID has no test name")
+	}
+	file := parts[0]
+	if !strings.HasSuffix(file, ".py") || strings.HasPrefix(file, "/") || strings.ContainsAny(file, `\: `) {
+		return invalid("Python node ID has an unsupported file path")
+	}
+	segments := strings.Split(strings.TrimSuffix(file, ".py"), "/")
+	for _, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." || strings.ContainsAny(segment, ".") {
+			return invalid("Python node ID has an unsupported file path")
+		}
+	}
+	qualifier := strings.Join(segments, ".")
+	for _, class := range parts[1 : len(parts)-1] {
+		if class == "" || strings.ContainsAny(class, " \t.") {
+			return invalid("Python node ID has an ambiguous class path")
+		}
+		qualifier += "." + class
+	}
+	function := parts[len(parts)-1]
+	if function == "" || strings.ContainsAny(function, " \t") {
+		return invalid("Python node ID has an ambiguous test name")
+	}
+	name := function + params
+	return markJUnitInstability(TestIdentity{ID: "py:" + qualifier + ":" + name, Language: "python", Package: qualifier, Name: name, File: file, RunnerID: nodeID}, nodeID), nil
+}
