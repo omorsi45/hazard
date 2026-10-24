@@ -1,10 +1,16 @@
 package runner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Target is one test selected for a narrowed run.
@@ -61,6 +67,95 @@ type Result struct {
 // ErrPassthroughNarrows reports a passthrough argument that would change which
 // tests run.
 var ErrPassthroughNarrows = errors.New("passthrough would narrow the selected tests")
+
+// exitInternal is the exit code reported when the runner itself failed (seed
+// 6.10): it is never 0, so a caller that ignores the error cannot report green.
+const exitInternal = 70
+
+// processWaitDelay bounds how long Wait lingers on output pipes after the
+// process was killed.
+const processWaitDelay = 10 * time.Second
+
+// junitPath returns the absolute JUnit path for req, defaulting to
+// <RepoDir>/.hazard/junit.xml.
+func junitPath(req Request) string {
+	p := req.JUnitPath
+	if p == "" {
+		p = filepath.Join(".hazard", "junit.xml")
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(req.RepoDir, p)
+	}
+	return p
+}
+
+// prepareJUnit creates the report directory and removes a report left by an
+// earlier run, so a failed run can never be read as the previous run's result.
+func prepareJUnit(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create JUnit directory: %w", err)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove stale JUnit report: %w", err)
+	}
+	return nil
+}
+
+// writeFileAtomic writes data to path through a temp file in the same
+// directory, so a reader never sees a partial report.
+func writeFileAtomic(path string, data []byte) (err error) {
+	f, err := os.CreateTemp(filepath.Dir(path), ".junit-*.tmp")
+	if err != nil {
+		return fmt.Errorf("write JUnit report: %w", err)
+	}
+	tmp := f.Name()
+	defer func() {
+		if err != nil {
+			if rmErr := os.Remove(tmp); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+				err = errors.Join(err, rmErr)
+			}
+		}
+	}()
+	if _, err = f.Write(data); err != nil {
+		return errors.Join(fmt.Errorf("write JUnit report: %w", err), f.Close())
+	}
+	if err = f.Close(); err != nil {
+		return fmt.Errorf("write JUnit report: %w", err)
+	}
+	if err = os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("publish JUnit report: %w", err)
+	}
+	return nil
+}
+
+// runProcess runs one invocation. A process that ran and exited nonzero is not
+// an error: its exit code is returned, never 0. An error means the process
+// could not be run to completion (it did not start, or the context ended), and
+// comes with exitInternal.
+func runProcess(ctx context.Context, inv Invocation, stdout, stderr io.Writer) (int, error) {
+	cmd := exec.CommandContext(ctx, inv.Argv[0], inv.Argv[1:]...)
+	cmd.Dir = inv.Dir
+	if len(inv.Env) > 0 {
+		cmd.Env = append(os.Environ(), inv.Env...)
+	}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.WaitDelay = processWaitDelay
+	err := cmd.Run()
+	if err == nil {
+		return 0, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return exitInternal, fmt.Errorf("%s: %w", inv.Argv[0], ctxErr)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if code := exitErr.ExitCode(); code > 0 {
+			return code, nil
+		}
+		return 1, nil
+	}
+	return exitInternal, fmt.Errorf("run %s: %w", inv.Argv[0], err)
+}
 
 // ValidatePassthrough rejects arguments that would narrow the selected tests.
 // lang is "go" or "python". The returned error wraps ErrPassthroughNarrows and

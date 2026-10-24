@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"slices"
@@ -106,4 +107,49 @@ func goTargetParent(t Target) (string, error) {
 		return "", fmt.Errorf("target %q has no top-level test name (%q)", t.ID, t.Name)
 	}
 	return parent, nil
+}
+
+// RunGo runs the planned go test invocations and writes one JUnit report to
+// the request's JUnitPath.
+//
+// Every invocation runs, even after one fails. ExitCode is the first nonzero
+// process exit code and is 0 only when every invocation passed; it is never 0
+// when an error is returned. The report is written only when every process ran
+// to completion, and a report from an earlier run is removed first.
+func RunGo(ctx context.Context, req Request) (Result, error) {
+	invocations, widened, err := GoInvocations(req)
+	if err != nil {
+		return Result{ExitCode: exitInternal}, err
+	}
+	res := Result{Invocations: invocations, Widened: widened}
+	path := junitPath(req)
+	if err := prepareJUnit(path); err != nil {
+		res.ExitCode = exitInternal
+		return res, err
+	}
+
+	builder := newGoJUnitBuilder(req.Stdout)
+	for _, inv := range invocations {
+		code, err := runProcess(ctx, inv, builder, req.Stderr)
+		builder.Flush()
+		if err != nil {
+			res.ExitCode = exitInternal
+			return res, err
+		}
+		if res.ExitCode == 0 {
+			res.ExitCode = code
+		}
+	}
+
+	data, err := builder.Marshal()
+	if err == nil {
+		err = writeFileAtomic(path, data)
+	}
+	if err == nil && builder.Err() != nil {
+		err = fmt.Errorf("write test output: %w", builder.Err())
+	}
+	if err != nil && res.ExitCode == 0 {
+		res.ExitCode = exitInternal
+	}
+	return res, err
 }
