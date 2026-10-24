@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"go/parser"
 	"go/token"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -733,4 +736,92 @@ func TestStmtInCaseClauses(t *testing.T) {
 		{ctx: "y()", within: "y()", op: "stmt", orig: "y()", mut: "", line: 8},
 		{ctx: "z()", within: "z()", op: "stmt", orig: "z()", mut: "", line: 12},
 	})
+}
+
+// repoRoot returns the repository root, two levels above this package.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mod, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil || !strings.Contains(string(mod), "module github.com/omorsi45/hazard") {
+		t.Fatalf("repository root %s has no hazard go.mod (err %v)", root, err)
+	}
+	return root
+}
+
+// TestRepository mutates every non-test Go file under internal/ and checks the
+// mutants against the real code: they apply, they still parse, their IDs are
+// unique, and a second run gives the same answer.
+func TestRepository(t *testing.T) {
+	root := repoRoot(t)
+	ops := []string{"cmp", "logic", "const", "ret", "stmt"}
+	counts := map[string]int{}
+	idFile := map[string]string{}
+	files, total := 0, 0
+	err := filepath.WalkDir(filepath.Join(root, "internal"), func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		muts, err := GoMutants(rel, src, ops)
+		if err != nil {
+			t.Errorf("%s: GoMutants: %v", rel, err)
+			return nil
+		}
+		files++
+		again, err := GoMutants(rel, src, ops)
+		if err != nil || !reflect.DeepEqual(muts, again) {
+			t.Errorf("%s: a second run gives a different answer (err %v)", rel, err)
+		}
+		for i, m := range muts {
+			counts[m.Operator]++
+			total++
+			if other, dup := idFile[m.ID]; dup {
+				t.Errorf("%s: mutant ID %s already used by %s", rel, m.ID, other)
+			}
+			idFile[m.ID] = rel
+			if m.File != rel || m.Line < 1 || m.Length != len(m.Original) {
+				t.Errorf("%s: inconsistent mutant %+v", rel, m)
+			}
+			if i > 0 && muts[i-1].Offset > m.Offset {
+				t.Errorf("%s: mutants out of order at %d", rel, i)
+			}
+			out, err := Apply(src, m)
+			if err != nil {
+				t.Errorf("%s: Apply %+v: %v", rel, m, err)
+				continue
+			}
+			if _, err := parser.ParseFile(token.NewFileSet(), rel, out, parser.SkipObjectResolution); err != nil {
+				t.Errorf("%s: mutant %s (%s %q -> %q at line %d) does not parse: %v", rel, m.ID, m.Operator, m.Original, m.Mutated, m.Line, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files == 0 {
+		t.Fatal("no Go files found under internal/")
+	}
+	for _, op := range ops {
+		t.Logf("operator %-5s %6d mutants", op, counts[op])
+		if counts[op] == 0 {
+			t.Errorf("operator %s produced no mutants over the repository", op)
+		}
+	}
+	t.Logf("total %d mutants in %d files", total, files)
 }

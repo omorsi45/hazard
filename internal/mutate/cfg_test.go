@@ -1,6 +1,10 @@
 package mutate
 
 import (
+	"encoding/json"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -392,4 +396,65 @@ func TestConfigDeterministicAndUnique(t *testing.T) {
 			t.Errorf("mutants %d and %d are out of order", i-1, i)
 		}
 	}
+}
+
+// TestRepositoryConfig mutates every configuration file in the repository and
+// checks that each mutant applies and, for json, still decodes.
+func TestRepositoryConfig(t *testing.T) {
+	root := repoRoot(t)
+	idFile := map[string]string{}
+	files, total := 0, 0
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); p != root && strings.HasPrefix(name, ".") && name != ".github" {
+				return filepath.SkipDir // .git, .hazard and other tool directories
+			}
+			return nil
+		}
+		if cfgFormatOf(p) == cfgNone {
+			return nil
+		}
+		src, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		files++
+		muts := ConfigMutants(rel, src)
+		if again := ConfigMutants(rel, src); !reflect.DeepEqual(muts, again) {
+			t.Errorf("%s: a second run gives a different answer", rel)
+		}
+		validJSON := strings.HasSuffix(rel, ".json") && json.Valid(src)
+		for _, m := range muts {
+			total++
+			if other, dup := idFile[m.ID]; dup {
+				t.Errorf("%s: mutant ID %s already used by %s", rel, m.ID, other)
+			}
+			idFile[m.ID] = rel
+			out, err := Apply(src, m)
+			if err != nil {
+				t.Errorf("%s: Apply %+v: %v", rel, m, err)
+				continue
+			}
+			if validJSON && !json.Valid(out) {
+				t.Errorf("%s: mutant %s (%q -> %q at line %d) breaks the json", rel, m.ID, m.Original, m.Mutated, m.Line)
+			}
+		}
+		t.Logf("%-40s %4d cfg mutants", rel, len(muts))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files == 0 {
+		t.Fatal("no configuration files found in the repository")
+	}
+	t.Logf("total %d cfg mutants in %d files", total, files)
 }
