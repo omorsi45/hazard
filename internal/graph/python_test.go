@@ -116,6 +116,47 @@ func TestPythonLoadDynamicImport(t *testing.T) {
 	}
 }
 
+func TestPythonLoadBOMPrefixedModule(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"pkg/__init__.py": "",
+		"pkg/a.py":        "x = 1\n",
+		"pkg/b.py":        "x = 1\n",
+		"pkg/bom.py":      "\xef\xbb\xbfimport pkg.a\nimport pkg.b\n",
+		"pkg/bomfrom.py":  "\xef\xbb\xbffrom pkg import a\n",
+	})
+	g, err := LoadPython(dir, []string{"."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := g.Packages["py:pkg.bom"].Imports, []string{"py:pkg", "py:pkg.a", "py:pkg.b"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("a leading byte order mark hid the line-1 import: imports = %v, want %v", got, want)
+	}
+	if got, want := g.Packages["py:pkg.bomfrom"].Imports, []string{"py:pkg", "py:pkg.a"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("from-import on line 1 after a byte order mark: imports = %v, want %v", got, want)
+	}
+}
+
+func TestPythonLoadAliasedDynamicImport(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"app/__init__.py": "",
+		"app/alias.py":    "from importlib import import_module as im\n\ndef load(n):\n    return im(n)\n",
+		"app/modalias.py": "import importlib as il\n\ndef load(n):\n    return il.import_module(n)\n",
+		"app/bare.py":     "def load(n):\n    return __import__(n)\n",
+		"app/plain.py":    "from importlib import import_module as im\n",
+	})
+	g, err := LoadPython(dir, []string{"."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]bool{"py:app.alias": true, "py:app.modalias": true, "py:app.bare": true, "py:app.plain": false} {
+		if got := g.Packages[id].Dynamic; got != want {
+			t.Errorf("%s Dynamic = %v, want %v", id, got, want)
+		}
+	}
+}
+
 func TestPythonLoadUnresolvableRelativeImport(t *testing.T) {
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{

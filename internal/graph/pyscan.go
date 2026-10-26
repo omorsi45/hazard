@@ -1,9 +1,14 @@
 package graph
 
 import (
+	"bytes"
 	"regexp"
 	"strings"
 )
+
+// utf8BOM is the byte order mark editors on Windows prepend to UTF-8 files. It
+// is not part of the Python source, so the scanners drop one leading mark.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
 // pyImport is one import statement found by scanPython.
 type pyImport struct {
@@ -14,6 +19,10 @@ type pyImport struct {
 }
 
 var (
+	// pyDynamicCall matches a call of __import__ or import_module anywhere,
+	// including importlib.import_module and X.import_module for any alias X of
+	// importlib. Calls through a name bound by "from importlib import
+	// import_module as X" are found through importModuleAliases.
 	pyDynamicCall = regexp.MustCompile(`(?:\b__import__|\bimport_module)\s*\(`)
 	pyImportStmt  = regexp.MustCompile(`^import\s+(.+)$`)
 	pyFromStmt    = regexp.MustCompile(`^from\s+(\.*)\s*([\w.\s]*?)\s*\bimport\b\s*(.*)$`)
@@ -25,6 +34,7 @@ var (
 // reliably (unbalanced brackets or an unterminated string at end of file).
 func scanPython(src []byte) (imports []pyImport, dynamic bool, ok bool) {
 	lines, ok := logicalLines(src)
+	var aliases []string
 	for _, line := range lines {
 		if pyDynamicCall.MatchString(line) {
 			dynamic = true
@@ -34,12 +44,49 @@ func scanPython(src []byte) (imports []pyImport, dynamic bool, ok bool) {
 			if !pyStartsImp.MatchString(stmt) {
 				stmt = afterHeader(stmt)
 			}
+			aliases = append(aliases, importModuleAliases(stmt)...)
 			if imp, found := parseImport(stmt); found {
 				imports = append(imports, imp...)
 			}
 		}
 	}
+	if !dynamic && len(aliases) > 0 {
+		// The alias can be bound after the function that calls it, so every
+		// line is checked once all bindings are known.
+		call := regexp.MustCompile(`\b(?:` + strings.Join(quoteAll(aliases), "|") + `)\s*\(`)
+		for _, line := range lines {
+			if call.MatchString(line) {
+				dynamic = true
+				break
+			}
+		}
+	}
 	return imports, dynamic, ok
+}
+
+// importModuleAliases returns the names that a statement of the form
+// "from importlib import import_module as X" binds to import_module.
+func importModuleAliases(stmt string) []string {
+	m := pyFromStmt.FindStringSubmatch(stmt)
+	if m == nil || m[1] != "" || strings.Join(strings.Fields(m[2]), "") != "importlib" {
+		return nil
+	}
+	var aliases []string
+	for _, item := range strings.Split(strings.Trim(strings.TrimSpace(m[3]), "()"), ",") {
+		fields := strings.Fields(strings.Trim(strings.TrimSpace(item), "()"))
+		if len(fields) == 3 && fields[0] == "import_module" && fields[1] == "as" {
+			aliases = append(aliases, fields[2])
+		}
+	}
+	return aliases
+}
+
+func quoteAll(names []string) []string {
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = regexp.QuoteMeta(name)
+	}
+	return quoted
 }
 
 // afterHeader returns the statement following the top-level colon of a
@@ -108,6 +155,7 @@ func importedName(item string) string {
 // brackets are open or after a backslash continuation. ok is false when a
 // string is unterminated at end of file or brackets are unbalanced there.
 func logicalLines(src []byte) (lines []string, ok bool) {
+	src = bytes.TrimPrefix(src, utf8BOM)
 	var line []byte
 	depth := 0
 	ok = true

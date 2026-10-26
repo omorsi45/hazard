@@ -68,15 +68,26 @@ func TestPythonScanSkipsCommentsAndStrings(t *testing.T) {
 }
 
 func TestPythonScanDynamicImports(t *testing.T) {
-	for _, src := range []string{
-		"import importlib\nmod = importlib.import_module('x')\n",
-		"from importlib import import_module\nm = import_module(name)\n",
-		"m = __import__('x')\n",
-		"m = importlib . import_module (\n    'x')\n",
+	for name, src := range map[string]string{
+		"importlib attribute":        "import importlib\nmod = importlib.import_module('x')\n",
+		"from import":                "from importlib import import_module\nm = import_module(name)\n",
+		"dunder import":              "m = __import__('x')\n",
+		"spaced attribute":           "m = importlib . import_module (\n    'x')\n",
+		"bare import_module":         "m = import_module('x')\n",
+		"bare dunder import":         "def load(n):\n    return __import__(n)\n",
+		"module alias":               "import importlib as il\nm = il.import_module(name)\n",
+		"function alias":             "from importlib import import_module as im\nm = im(name)\n",
+		"function alias spaced call": "from importlib import import_module as im\nm = im (name)\n",
+		"function alias in a list":   "from importlib import util, import_module as im\nm = im(name)\n",
+		"function alias parenthesis": "from importlib import (\n    util,\n    import_module as im,  # comment\n)\nm = im(name)\n",
+		"function alias used first":  "def load(n):\n    return im(n)\n\nfrom importlib import import_module as im\n",
+		"function alias one-liner":   "from importlib import import_module as im; m = im('x')\n",
+		"function alias in a try":    "try: from importlib import import_module as im\nexcept ImportError: raise\nm = im('x')\n",
+		"function alias in a def":    "def load(n):\n    from importlib import import_module as im\n    return im(n)\n",
 	} {
 		_, dynamic, ok := scanPython([]byte(src))
 		if !ok || !dynamic {
-			t.Errorf("dynamic import not recorded for %q (dynamic=%v ok=%v)", src, dynamic, ok)
+			t.Errorf("%s: dynamic import not recorded for %q (dynamic=%v ok=%v)", name, src, dynamic, ok)
 		}
 	}
 	for _, src := range []string{
@@ -84,10 +95,33 @@ func TestPythonScanDynamicImports(t *testing.T) {
 		"s = 'importlib.import_module(x)'\n",
 		"x = my_import_modules_total\n",
 		"import importlib\n",
+		"from importlib import import_module as im\n",
+		"from importlib import util as im\nm = im(name)\n",
+		"from other import import_module as im\nm = im(name)\n",
+		"def im(n):\n    return n\n",
+		"import importlib as il\nvalue = il.machinery\n",
 	} {
 		_, dynamic, ok := scanPython([]byte(src))
 		if !ok || dynamic {
 			t.Errorf("false dynamic import for %q (dynamic=%v ok=%v)", src, dynamic, ok)
+		}
+	}
+}
+
+func TestPythonScanStripsLeadingBOM(t *testing.T) {
+	const bom = "\xef\xbb\xbf"
+	for _, tc := range []struct {
+		name string
+		src  string
+		want []pyImport
+	}{
+		{"import", bom + "import a\nimport b\n", []pyImport{{Module: "a"}, {Module: "b"}}},
+		{"from import", bom + "from a import b\n", []pyImport{{From: true, Module: "a", Names: []string{"b"}}}},
+		{"crlf", bom + "import a\r\nimport b\r\n", []pyImport{{Module: "a"}, {Module: "b"}}},
+	} {
+		got, dynamic, ok := scanPython([]byte(tc.src))
+		if !ok || dynamic || !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: scan = %+v dynamic=%v ok=%v, want %+v", tc.name, got, dynamic, ok, tc.want)
 		}
 	}
 }
