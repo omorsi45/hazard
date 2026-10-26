@@ -129,7 +129,9 @@ func TestCoverageMissingDigestIsUnknown(t *testing.T) {
 	for name, edit := range map[string]func(*Input){
 		"no base digest":     func(in *Input) { delete(in.BaseDigests, "core/core.go") },
 		"no coverage digest": func(in *Input) { delete(in.Index.Coverage.FileDigests, "core/core.go") },
-		"empty digests":      func(in *Input) { in.BaseDigests["core/core.go"], in.Index.Coverage.FileDigests["core/core.go"] = "", "" },
+		"empty digests": func(in *Input) {
+			in.BaseDigests["core/core.go"], in.Index.Coverage.FileDigests["core/core.go"] = "", ""
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			in := coverageInput(changeSet(cf("core/core.go", "M", change.KindSource, hunk(10, 3, "Do"))))

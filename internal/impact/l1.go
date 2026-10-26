@@ -69,6 +69,7 @@ func L1(in Input) (*Result, error) {
 	}
 	certain := certainSet{}
 	addDirect(certain, inv, in.Index, files)
+	var ev coverageEval
 	switch {
 	case in.Mode == ModeGraph:
 		for id, h := range res.TestHops {
@@ -77,7 +78,8 @@ func L1(in Input) (*Result, error) {
 			}
 		}
 	case res.CoverageState == covFresh:
-		selectByCoverage(certain, in, inv, evalCoverage(in, files, m), res.TestHops)
+		ev = evalCoverage(in, files, m)
+		selectByCoverage(certain, in, inv, ev, res.TestHops)
 	default:
 		// Missing or stale coverage never narrows: every reachable test is
 		// selected, whatever the hop bound.
@@ -88,7 +90,27 @@ func L1(in Input) (*Result, error) {
 	addFixture(certain, inv, in.Index, files)
 	addAlwaysRun(certain, inv, in.AlwaysRun)
 	res.Certain = certain.members()
+	rankCandidates(res, in, inv, files, certain, ev)
 	return res, nil
+}
+
+// rankCandidates ranks every inventory test that is not CERTAIN and keeps the
+// highest ranked up to the cap. The cap applies to candidates only: it never
+// removes a CERTAIN member.
+func rankCandidates(res *Result, in Input, inv *inventory, files []change.ChangedFile, certain certainSet, ev coverageEval) {
+	rk := newRanker(in, inv, files, res, ev)
+	var scored []ranked
+	for _, t := range inv.tests {
+		if !certain.has(t.ID) {
+			scored = append(scored, rk.score(t))
+		}
+	}
+	sort.Slice(scored, func(i, j int) bool { return rankedLess(scored[i], scored[j], in.Impact.CandidateRanking) })
+	keep := min(candidateCap(in), len(scored))
+	res.RawCandidates, res.Truncated = len(scored), len(scored)-keep
+	for _, s := range scored[:keep] {
+		res.Candidates = append(res.Candidates, s.cand)
+	}
 }
 
 // validate rejects inputs no safe selection can be computed from.
