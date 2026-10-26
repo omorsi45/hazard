@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/omorsi45/hazard/internal/index"
 	"github.com/omorsi45/hazard/internal/mine"
 )
 
@@ -68,6 +69,7 @@ func NewRoot() *cobra.Command {
 	root.AddCommand(run)
 
 	root.AddCommand(newMineCommand(mine.Mine))
+	root.AddCommand(newIndexCommand(index.Build, index.Publish))
 
 	labels := &cobra.Command{Use: "labels", Short: "Build and inspect regression labels"}
 	for _, item := range []struct{ name, purpose string }{
