@@ -56,6 +56,24 @@ func L1(in Input) (*Result, error) {
 		}
 	}
 	res.ChangedPackages = m.changed
+	hops := in.Index.Graph.ReverseHops(m.changed)
+	for id, pkg := range inv.pkgOf {
+		if h, ok := hops[pkg]; ok {
+			res.TestHops[id] = h
+		}
+	}
+	certain := certainSet{}
+	addDirect(certain, inv, in.Index, files)
+	if in.Mode == ModeGraph {
+		for id, h := range res.TestHops {
+			if h <= in.Impact.MaxHops {
+				certain.add(id, reasonGraph)
+			}
+		}
+	}
+	addFixture(certain, inv, in.Index, files)
+	addAlwaysRun(certain, inv, in.AlwaysRun)
+	res.Certain = certain.members()
 	return res, nil
 }
 
@@ -63,6 +81,9 @@ func L1(in Input) (*Result, error) {
 func validate(in Input) error {
 	if in.Change == nil {
 		return errors.New("impact: nil change set")
+	}
+	if in.Mode != ModeGraph && in.Mode != ModeCoverage {
+		return fmt.Errorf("impact: unknown mode %d", in.Mode)
 	}
 	if in.Impact.MaxHops < 0 {
 		return fmt.Errorf("impact: negative max_hops %d", in.Impact.MaxHops)

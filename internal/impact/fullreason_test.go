@@ -197,6 +197,7 @@ func TestInvalidInvocation(t *testing.T) {
 	}{
 		{"nil change set", func(in *Input) { in.Change = nil }},
 		{"negative max hops", func(in *Input) { in.Impact.MaxHops = -1 }},
+		{"unknown mode", func(in *Input) { in.Mode = Mode(7) }},
 		{"no candidate cap", func(in *Input) { in.Impact.MaxCandidates = 0 }},
 		{"unknown ranking token", func(in *Input) { in.Impact.CandidateRanking = []string{"coverage_overlap", "vibes"} }},
 	}
