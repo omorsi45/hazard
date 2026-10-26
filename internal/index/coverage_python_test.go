@@ -47,7 +47,11 @@ func writeCoverageDB(t *testing.T, path string, files []string, contexts []strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close coverage fixture database: %v", err)
+		}
+	}()
 	for _, stmt := range []string{
 		`CREATE TABLE file (id integer primary key, path text, unique (path))`,
 		`CREATE TABLE context (id integer primary key, context text, unique (context))`,

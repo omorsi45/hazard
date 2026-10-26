@@ -139,7 +139,7 @@ func collectGoCoverage(ctx context.Context, root string, cfg config.Config, m *M
 	if err != nil {
 		return res, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }() // best-effort cleanup of scratch profiles
 
 	runs := make([]goTestRun, len(tests))
 	jobs := make(chan int)

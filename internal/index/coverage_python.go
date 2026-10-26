@@ -46,12 +46,12 @@ func readCoverageDB(dbPath, root string) (pyLines, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }() // read-only handle: nothing to flush
 	rows, err := db.Query(`SELECT file.path, context.context, line_bits.numbits FROM line_bits JOIN file ON file.id = line_bits.file_id JOIN context ON context.id = line_bits.context_id`)
 	if err != nil {
 		return nil, fmt.Errorf("read coverage data: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }() // iteration errors are reported by rows.Err below
 	data := pyLines{}
 	for rows.Next() {
 		var file string
@@ -237,7 +237,7 @@ func collectPythonCoverage(ctx context.Context, root, python string, cfg config.
 	if err != nil {
 		return res, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }() // best-effort cleanup of the scratch data file
 	dbPath := filepath.Join(tmp, "coverage.db")
 	rc := filepath.Join(tmp, "coveragerc")
 	rcText := "[run]\ndata_file = " + filepath.ToSlash(dbPath) + "\ndynamic_context = test_function\nrelative_files = True\n"
