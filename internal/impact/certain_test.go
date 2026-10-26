@@ -87,12 +87,25 @@ func TestDirectRule(t *testing.T) {
 	cases := []struct {
 		name  string
 		files []change.ChangedFile
+		edit  func(*Input)
 		want  map[string]string
 	}{
 		{
 			name:  "a changed test file selects every test of its package",
 			files: []change.ChangedFile{cf("core/core_test.go", "M", change.KindTest, hunk(5, 2, "TestCore"))},
 			want:  map[string]string{testID("m/core", "TestCore"): "direct", testID("m/core", "TestCoreAux"): "direct"},
+		},
+		{
+			name:  "tests in the package's other test files are selected too",
+			files: []change.ChangedFile{cf("left/left_test.go", "M", change.KindTest, hunk(5, 2))},
+			edit: func(in *Input) {
+				extra := goTest("m/left", "TestLeftOther")
+				extra.File = "left/other_test.go"
+				in.Index.Tests = append(in.Index.Tests, extra)
+				pkg := in.Index.Graph.Packages["m/left"]
+				pkg.TestFiles = append(pkg.TestFiles, extra.File)
+			},
+			want: map[string]string{testID("m/left", "TestLeft"): "direct", testID("m/left", "TestLeftOther"): "direct"},
 		},
 		{
 			name:  "a deleted test file selects the tests it held",
@@ -123,6 +136,9 @@ func TestDirectRule(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			in := graphInput(changeSet(tc.files...))
 			in.Impact.MaxHops = 0
+			if tc.edit != nil {
+				tc.edit(&in)
+			}
 			r := mustL1(t, in)
 			if got := certainMap(r); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("certain = %v, want %v", got, tc.want)
