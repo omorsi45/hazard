@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,7 +18,10 @@ import (
 // handling, cancellation) is tested without waiting for real compiles.
 const fakeGoEnv = "HAZARD_RUNNER_FAKE_GO"
 
-// fakeGoDir holds a copy of the test binary named like the go command.
+// fakePythonEnv carries a JSON fakePythonSpec for the stand-in python.
+const fakePythonEnv = "HAZARD_RUNNER_FAKE_PY"
+
+// fakeGoDir holds copies of the test binary named like the go and python commands.
 var fakeGoDir string
 
 type fakeGoPackage struct {
@@ -43,6 +47,9 @@ func TestMain(m *testing.M) {
 	if spec := os.Getenv(fakeGoEnv); spec != "" {
 		os.Exit(runFakeGo(spec))
 	}
+	if spec := os.Getenv(fakePythonEnv); spec != "" {
+		os.Exit(runFakePython(spec))
+	}
 	dir, err := os.MkdirTemp("", "hazard-fakego-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -60,8 +67,20 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func installFakeGo(dir string) (err error) {
-	src, err := os.Open(os.Args[0])
+func installFakeGo(dir string) error {
+	for _, name := range []string{"go", "python"} {
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		if err := copyFile(os.Args[0], filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyFile(from, to string) (err error) {
+	src, err := os.Open(from)
 	if err != nil {
 		return err
 	}
@@ -70,11 +89,7 @@ func installFakeGo(dir string) (err error) {
 			err = cerr
 		}
 	}()
-	name := "go"
-	if runtime.GOOS == "windows" {
-		name = "go.exe"
-	}
-	dst, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	dst, err := os.OpenFile(to, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return err
 	}
@@ -85,6 +100,35 @@ func installFakeGo(dir string) (err error) {
 	}()
 	_, err = io.Copy(dst, src)
 	return err
+}
+
+// fakePythonSpec makes the stand-in python behave like pytest after a
+// collection that found missing node IDs (or not).
+type fakePythonSpec struct {
+	Exit    int
+	Missing []string
+	// DeleteMissingOut removes the missing-ids file, as a crashed plugin would.
+	DeleteMissingOut bool
+}
+
+func runFakePython(raw string) int {
+	var spec fakePythonSpec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		fmt.Fprintln(os.Stderr, "fake python: bad spec:", err)
+		return 98
+	}
+	if out := os.Getenv("HAZARD_MISSING_OUT"); out != "" && spec.DeleteMissingOut {
+		if err := os.Remove(out); err != nil {
+			fmt.Fprintln(os.Stderr, "fake python:", err)
+			return 98
+		}
+	} else if out != "" && len(spec.Missing) > 0 {
+		if err := os.WriteFile(out, []byte(strings.Join(spec.Missing, "\n")+"\n"), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "fake python:", err)
+			return 98
+		}
+	}
+	return spec.Exit
 }
 
 func runFakeGo(raw string) int {
