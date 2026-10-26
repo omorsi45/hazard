@@ -241,7 +241,7 @@ func TestAlwaysRunKeepsUnknownIDsAndLowestPrecedence(t *testing.T) {
 	in.Impact.MaxHops = 0
 	in.AlwaysRun = map[string]string{
 		testID("m/core", "TestCore"): "quarantined", // also graph: graph wins
-		"go:m/ghost:TestGhost":       "manual",     // not in the inventory: still always-run
+		"go:m/ghost:TestGhost":       "manual",      // not in the inventory: still always-run
 	}
 	got := certainMap(mustL1(t, in))
 	want := map[string]string{

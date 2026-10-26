@@ -62,13 +62,27 @@ func L1(in Input) (*Result, error) {
 			res.TestHops[id] = h
 		}
 	}
+	res.CoverageState = coverageStateOf(in, inv, files)
+	if in.Mode == ModeCoverage && res.CoverageState != covFresh && in.Impact.CoverageRequired {
+		res.FullReason = fullCoverageRequiredPrefix + res.CoverageState
+		return res, nil
+	}
 	certain := certainSet{}
 	addDirect(certain, inv, in.Index, files)
-	if in.Mode == ModeGraph {
+	switch {
+	case in.Mode == ModeGraph:
 		for id, h := range res.TestHops {
 			if h <= in.Impact.MaxHops {
 				certain.add(id, reasonGraph)
 			}
+		}
+	case res.CoverageState == covFresh:
+		selectByCoverage(certain, in, inv, evalCoverage(in, files, m), res.TestHops)
+	default:
+		// Missing or stale coverage never narrows: every reachable test is
+		// selected, whatever the hop bound.
+		for id := range res.TestHops {
+			certain.add(id, reasonGraph)
 		}
 	}
 	addFixture(certain, inv, in.Index, files)
