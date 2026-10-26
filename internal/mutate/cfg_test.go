@@ -311,7 +311,13 @@ func TestConfigProperties(t *testing.T) {
 		/* 12 */ `esc\=key=7`,
 		/* 13 */ "nosep",
 		/* 14 */ "hash=a # b",
+		/* 15 */ `k=""`,
+		/* 16 */ `k = ""`,
+		/* 17 */ `k: ""`,
 	)
+	// Lines 15 to 17 hold a value that already is two double quote characters.
+	// Properties has no quoting, so the value would be "emptied" to the same
+	// bytes: no mutant may be returned for them.
 	checkConfig(t, "app.properties", src, join(
 		cfgSpots("app.name=demo", "demo", "demo", 3, `""`),
 		cfgSpots("app.port = 8080", "8080", "8080", 4, "8081", "0"),
@@ -373,13 +379,24 @@ func TestConfigIgnoresOtherFiles(t *testing.T) {
 }
 
 func TestConfigDeterministicAndUnique(t *testing.T) {
-	src := []byte(lines("a: 1", "b: true", "c: text", "d: 2.5"))
-	first := ConfigMutants("a.yaml", src)
+	// The properties input holds values that are already two double quotes:
+	// they must not yield a mutant that replaces the bytes with themselves.
+	for _, in := range []struct{ file, src string }{
+		{"a.yaml", lines("a: 1", "b: true", "c: text", "d: 2.5")},
+		{"a.properties", lines("a=1", "b=true", `c=""`, "d=text", "e = 2.5")},
+	} {
+		t.Run(in.file, func(t *testing.T) { checkDeterministicAndUnique(t, in.file, []byte(in.src)) })
+	}
+}
+
+func checkDeterministicAndUnique(t *testing.T, file string, src []byte) {
+	t.Helper()
+	first := ConfigMutants(file, src)
 	if len(first) == 0 {
 		t.Fatal("expected mutants")
 	}
 	for i := 0; i < 5; i++ {
-		if again := ConfigMutants("a.yaml", src); !reflect.DeepEqual(first, again) {
+		if again := ConfigMutants(file, src); !reflect.DeepEqual(first, again) {
 			t.Fatalf("run %d differs from the first run", i)
 		}
 	}
@@ -391,6 +408,9 @@ func TestConfigDeterministicAndUnique(t *testing.T) {
 		seen[m.ID] = true
 		if m.Operator != "cfg" {
 			t.Errorf("%v: operator %q, want cfg", m, m.Operator)
+		}
+		if m.Original == m.Mutated {
+			t.Errorf("%v: replaces %q with itself", m, m.Original)
 		}
 		if i > 0 && (first[i-1].Offset > m.Offset || (first[i-1].Offset == m.Offset && first[i-1].Mutated > m.Mutated)) {
 			t.Errorf("mutants %d and %d are out of order", i-1, i)
@@ -438,6 +458,9 @@ func TestRepositoryConfig(t *testing.T) {
 				t.Errorf("%s: mutant ID %s already used by %s", rel, m.ID, other)
 			}
 			idFile[m.ID] = rel
+			if m.Original == m.Mutated {
+				t.Errorf("%s: mutant %s replaces %q with itself at line %d", rel, m.ID, m.Original, m.Line)
+			}
 			out, err := Apply(src, m)
 			if err != nil {
 				t.Errorf("%s: Apply %+v: %v", rel, m, err)

@@ -58,13 +58,17 @@ func newBuilder(file string, src []byte) *builder {
 }
 
 // add records a mutant replacing src[offset:offset+length] with mutated. A
-// mutant whose ID was already recorded is dropped. A span outside the file is
-// remembered in b.err and dropped.
+// mutant whose ID was already recorded is dropped, and so is one that would
+// replace the bytes with themselves: it changes nothing, so it could never be
+// killed. A span outside the file is remembered in b.err and dropped.
 func (b *builder) add(operator string, offset, length int, mutated string) {
 	if offset < 0 || length < 0 || offset > len(b.src) || length > len(b.src)-offset {
 		if b.err == nil {
 			b.err = fmt.Errorf("mutate: %s: %s span [%d,+%d) is outside the %d byte file", b.file, operator, offset, length, len(b.src))
 		}
+		return
+	}
+	if string(b.src[offset:offset+length]) == mutated {
 		return
 	}
 	id := makeID(b.file, offset, operator, mutated)

@@ -797,6 +797,9 @@ func TestRepository(t *testing.T) {
 			if m.File != rel || m.Line < 1 || m.Length != len(m.Original) {
 				t.Errorf("%s: inconsistent mutant %+v", rel, m)
 			}
+			if m.Original == m.Mutated {
+				t.Errorf("%s: mutant %s replaces %q with itself at line %d", rel, m.ID, m.Original, m.Line)
+			}
 			if i > 0 && muts[i-1].Offset > m.Offset {
 				t.Errorf("%s: mutants out of order at %d", rel, i)
 			}

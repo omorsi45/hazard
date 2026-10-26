@@ -249,6 +249,20 @@ func TestBuilderRecordsInvalidSpan(t *testing.T) {
 	}
 }
 
+func TestBuilderDropsMutantsEqualToTheirOriginal(t *testing.T) {
+	b := newBuilder("f.go", []byte("0123456789"))
+	b.add("cfg", 2, 3, "234") // replaces the bytes with themselves
+	b.add("stmt", 5, 0, "")   // empty span replaced by nothing
+	b.add("cfg", 2, 3, "999") // a real change at the same span is kept
+	got := b.sorted()
+	if b.err != nil {
+		t.Fatalf("no-op mutants must be dropped quietly, got error %v", b.err)
+	}
+	if len(got) != 1 || got[0].Mutated != "999" {
+		t.Fatalf("sorted() = %+v, want only the 234 -> 999 mutant", got)
+	}
+}
+
 func TestBuilderDeduplicatesAndOrders(t *testing.T) {
 	src := []byte("0123456789")
 	b := newBuilder("f.go", src)
