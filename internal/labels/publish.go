@@ -30,14 +30,14 @@ type memberSnapshot struct {
 
 // publish writes one immutable build and moves the current marker to it, all
 // inside the caller's transaction.
-func publish(ctx context.Context, tx *sql.Tx, f *facts, cutoff time.Time, inputDigest string, decisions []*decision) (string, string, error) {
-	decisionDigest, err := decisionDigest(decisions)
+func publish(ctx context.Context, tx *sql.Tx, f *facts, cutoff time.Time, inputDigest string, decisions []*decision) (string, error) {
+	digest, err := decisionDigest(decisions)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	always, err := json.Marshal(alwaysRun(f, decisions))
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	id := buildIdentity(f.Provider, f.Project, cutoff, inputDigest)
 	var existing, current int
@@ -46,58 +46,58 @@ func publish(ctx context.Context, tx *sql.Tx, f *facts, cutoff time.Time, inputD
 		// Identical semantic input and cutoff: the build is reused, never rewritten.
 		if current == 0 {
 			if err := moveCurrentMarker(ctx, tx, id); err != nil {
-				return "", "", err
+				return "", err
 			}
 		}
-		return id, "", nil
+		return id, nil
 	case !errors.Is(err, sql.ErrNoRows):
-		return "", "", fmt.Errorf("look up build: %w", err)
+		return "", fmt.Errorf("look up build: %w", err)
 	}
 	exclusions, activeGaps := acquisitionAccounting(f)
 	exclusionsJSON, err := json.Marshal(exclusions)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE label_builds SET is_current=0 WHERE is_current=1"); err != nil {
-		return "", "", fmt.Errorf("clear current build: %w", err)
+		return "", fmt.Errorf("clear current build: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO label_builds(build_id,provider,project,cutoff,algorithm_version,input_digest,decision_digest,always_run_json,acquisition_exclusions_json,active_gaps,created_at,is_current)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,1)`, id, f.Provider, f.Project, cutoff.UTC().Format(cutoffFormat), AlgorithmVersion, inputDigest, decisionDigest, string(always), string(exclusionsJSON), activeGaps,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,1)`, id, f.Provider, f.Project, cutoff.UTC().Format(cutoffFormat), AlgorithmVersion, inputDigest, digest, string(always), string(exclusionsJSON), activeGaps,
 		now().UTC().Format(time.RFC3339Nano)); err != nil {
-		return "", "", fmt.Errorf("insert build: %w", err)
+		return "", fmt.Errorf("insert build: %w", err)
 	}
 	for _, d := range decisions {
 		evidence, err := json.Marshal(d.Evidence)
 		if err != nil {
-			return "", "", err
+			return "", err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO label_candidates(build_id,candidate_key,kind,state,tested_sha,test_id,environment_id,branch,member_count,evidence_json)
 			VALUES(?,?,?,?,?,?,?,?,?,?)`, id, d.Key, d.Kind, d.State, nullIfEmpty(d.SHA), nullIfEmpty(d.TestID), nullIfEmpty(d.Env), nullIfEmpty(d.Branch), len(d.Members), string(evidence)); err != nil {
-			return "", "", fmt.Errorf("insert candidate: %w", err)
+			return "", fmt.Errorf("insert candidate: %w", err)
 		}
 		for _, r := range d.Reasons {
 			refs, err := json.Marshal(append([]string{}, r.Evidence...))
 			if err != nil {
-				return "", "", err
+				return "", err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO label_candidate_exclusions(build_id,candidate_key,reason,effect,evidence_json) VALUES(?,?,?,?,?)`,
 				id, d.Key, r.Name, r.Effect, string(refs)); err != nil {
-				return "", "", fmt.Errorf("insert reason: %w", err)
+				return "", fmt.Errorf("insert reason: %w", err)
 			}
 		}
 		for _, m := range d.Members {
 			snapshot, err := json.Marshal(memberSnapshot{RunID: m.art.RunID, JobID: m.art.JobID, Attempt: m.art.Attempt, ArtifactID: m.art.ArtifactID,
 				Branch: m.art.Branch, TestedSHA: d.SHA, EnvironmentID: d.Env, TestID: d.TestID})
 			if err != nil {
-				return "", "", err
+				return "", err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO label_candidate_members(build_id,provider,project,unit_key,content_sha256,artifact_entry,case_ordinal,candidate_key,status,observed_at,snapshot_json)
 				VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, m.Provider, m.Project, m.UnitKey, m.ContentSHA256, m.ArtifactEntry, m.CaseOrdinal, d.Key, m.Status, m.ObservedAt, string(snapshot)); err != nil {
-				return "", "", fmt.Errorf("insert member: %w", err)
+				return "", fmt.Errorf("insert member: %w", err)
 			}
 		}
 	}
-	return id, decisionDigest, nil
+	return id, nil
 }
 
 // moveCurrentMarker makes id the single current build.

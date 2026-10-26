@@ -82,7 +82,7 @@ func Build(ctx context.Context, db *sql.DB, opts Options) (_ Report, err error) 
 	if err != nil {
 		return Report{}, err
 	}
-	id, _, err := publish(ctx, tx, f, before, inputDigest, classify(f))
+	id, err := publish(ctx, tx, f, before, inputDigest, classify(f))
 	if err != nil {
 		return Report{}, err
 	}
