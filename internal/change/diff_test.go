@@ -190,7 +190,8 @@ func TestIsOID(t *testing.T) {
 	t.Parallel()
 	valid := []string{
 		strings.Repeat("a", 40), strings.Repeat("0", 40), strings.Repeat("F", 40), // SHA-1, any hex case
-		strings.Repeat("1", 64), // SHA-256
+		strings.Repeat("1", 64),                            // SHA-256
+		"0123456789abcdefABCDEF" + strings.Repeat("9", 18), // both ends of every range
 	}
 	for _, s := range valid {
 		if !isOID(s) {
@@ -200,6 +201,10 @@ func TestIsOID(t *testing.T) {
 	invalid := []string{
 		"", "HEAD", strings.Repeat("a", 39), strings.Repeat("a", 41), strings.Repeat("a", 63),
 		strings.Repeat("g", 40), "--output=x^{commit}", strings.Repeat("a", 39) + "\n",
+	}
+	// One character just outside each hex range, in an otherwise valid name.
+	for _, c := range []string{"/", ":", "@", "G", "`", "g"} {
+		invalid = append(invalid, strings.Repeat("a", 39)+c)
 	}
 	for _, s := range invalid {
 		if isOID(s) {
