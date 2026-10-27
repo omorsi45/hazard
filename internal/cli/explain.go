@@ -1,0 +1,185 @@
+package cli
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/omorsi45/hazard/internal/engine"
+	"github.com/omorsi45/hazard/internal/impact"
+)
+
+// featureNames name the values of impact.Features.Vector, in its order.
+var featureNames = []string{
+	"hops", "reachable", "coverage_overlap", "coverage_known", "coverage_stale",
+	"cofailure_rate", "cofailure_support", "test_fail_rate", "days_since_last_fail", "shared_symbol_hits",
+	"same_file", "same_package",
+	"kind_source", "kind_test", "kind_config", "kind_fixture", "kind_generated", "kind_docs", "kind_lock", "kind_build",
+	"lines_added", "lines_removed", "files_changed", "test_median_ms", "test_is_integration",
+}
+
+const (
+	noPredictor = "n/a (no predictor in M3)"
+	noShard     = "n/a"
+	noLambda    = "n/a (no lock)"
+)
+
+// explanation is what `hazard explain` reports about one test.
+type explanation struct {
+	Test                 string             `json:"test"`
+	InInventory          string             `json:"in_inventory"` // yes, no or unknown
+	Hops                 *int               `json:"hops"`         // null when unreachable or unknown
+	Reachable            bool               `json:"reachable"`
+	L1                   string             `json:"l1"`
+	Rank                 *float64           `json:"rank,omitempty"`
+	Features             map[string]float64 `json:"features,omitempty"`
+	CoverageState        string             `json:"coverage_state"`
+	PredictorProbability string             `json:"predictor_probability"`
+	Shard                string             `json:"shard"`
+	Lambda               string             `json:"lambda"`
+	Decision             string             `json:"decision"`
+
+	hopsText     string
+	featureOrder []string
+}
+
+func newExplainCommand(sel selectFunc) *cobra.Command {
+	cmd := &cobra.Command{
+		Use: "explain", Short: "Explain one test decision",
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return usageError{errors.New("explain accepts no positional arguments")}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().String("test", "", "stable test ID")
+	cmd.Flags().String("base", "", "base revision")
+	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+		testID, _ := cmd.Flags().GetString("test")
+		base, _ := cmd.Flags().GetString("base")
+		if testID == "" {
+			return usageError{errors.New("--test is required")}
+		}
+		if err := cmd.Context().Err(); err != nil {
+			return err
+		}
+		root, err := repoRoot(cmd.Context())
+		if err != nil {
+			return err
+		}
+		d, err := sel(cmd.Context(), engine.Options{RepoDir: root, Base: base, Explain: true})
+		if err != nil {
+			return mapEngineError(err)
+		}
+		exp, err := explain(d, testID)
+		if err != nil {
+			return err
+		}
+		if jsonMode, _ := cmd.Flags().GetBool("json"); jsonMode {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(exp)
+		}
+		_, err = fmt.Fprint(cmd.OutOrStdout(), exp.text())
+		return err
+	}
+	return cmd
+}
+
+// explain builds the explanation of testID from a decision. A test missing
+// from a trusted inventory is a usage error; with no usable inventory the
+// membership is reported as unknown.
+func explain(d engine.Decision, testID string) (explanation, error) {
+	e := explanation{
+		Test: testID, InInventory: "unknown", hopsText: "unknown", L1: "not computed (" + reasonOf(d, false) + ")",
+		CoverageState: "n/a", PredictorProbability: noPredictor, Shard: noShard, Lambda: noLambda,
+	}
+	if r := d.L1; r != nil {
+		i := sort.SearchStrings(r.AllTests, testID)
+		if i >= len(r.AllTests) || r.AllTests[i] != testID {
+			return e, usageError{fmt.Errorf("unknown test %q: it is not in the index inventory", testID)}
+		}
+		e.InInventory = "yes"
+		e.CoverageState = r.CoverageState
+		explainL1(&e, r, testID)
+	}
+	switch {
+	case d.FullSuite:
+		e.Decision = "full suite: " + reasonOf(d, false)
+	case containsTest(d.Tests, testID):
+		e.Decision = "selected"
+	default:
+		e.Decision = "not selected"
+	}
+	return e, nil
+}
+
+// explainL1 fills the L1 part of e for a test in the inventory.
+func explainL1(e *explanation, r *impact.Result, testID string) {
+	if h, ok := r.TestHops[testID]; ok {
+		e.Hops, e.Reachable, e.hopsText = &h, true, fmt.Sprint(h)
+	} else {
+		e.hopsText = "unreachable"
+	}
+	if r.FullReason != "" {
+		e.L1 = "full suite demanded (" + r.FullReason + ")"
+		return
+	}
+	for _, m := range r.Certain {
+		if m.TestID == testID {
+			e.L1 = "certain (" + m.Reason + ")"
+			return
+		}
+	}
+	for _, c := range r.Candidates {
+		if c.TestID != testID {
+			continue
+		}
+		rank := c.Rank
+		e.L1, e.Rank = fmt.Sprintf("candidate (rank %.4f)", c.Rank), &rank
+		e.Features = map[string]float64{}
+		for i, v := range c.Features.Vector() {
+			e.Features[featureNames[i]] = v
+			e.featureOrder = append(e.featureOrder, featureNames[i])
+		}
+		return
+	}
+	e.L1 = "residual, not ranked"
+	if r.Truncated > 0 {
+		e.L1 += fmt.Sprintf(" (candidate cap cut %d of %d)", r.Truncated, r.RawCandidates)
+	}
+}
+
+func containsTest(list []engine.Selected, id string) bool {
+	for _, s := range list {
+		if s.TestID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// text is the human-readable report.
+func (e explanation) text() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "test: %s\n", e.Test)
+	fmt.Fprintf(&b, "in inventory: %s\n", e.InInventory)
+	fmt.Fprintf(&b, "hops: %s\n", e.hopsText)
+	fmt.Fprintf(&b, "l1: %s\n", e.L1)
+	if len(e.featureOrder) > 0 {
+		parts := make([]string, len(e.featureOrder))
+		for i, name := range e.featureOrder {
+			parts[i] = fmt.Sprintf("%s=%g", name, e.Features[name])
+		}
+		fmt.Fprintf(&b, "features: %s\n", strings.Join(parts, " "))
+	}
+	fmt.Fprintf(&b, "coverage state: %s\n", e.CoverageState)
+	fmt.Fprintf(&b, "predictor probability: %s\n", e.PredictorProbability)
+	fmt.Fprintf(&b, "shard: %s\n", e.Shard)
+	fmt.Fprintf(&b, "lambda: %s\n", e.Lambda)
+	fmt.Fprintf(&b, "decision: %s\n", e.Decision)
+	return b.String()
+}

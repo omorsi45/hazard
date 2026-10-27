@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/omorsi45/hazard/internal/engine"
 	"github.com/omorsi45/hazard/internal/index"
 	"github.com/omorsi45/hazard/internal/mine"
 )
@@ -55,9 +56,7 @@ func NewRoot() *cobra.Command {
 		}
 	}
 
-	selectCmd := leaf("select", "Select tests without running them")
-	selectFlags(selectCmd)
-	root.AddCommand(selectCmd)
+	root.AddCommand(newSelectCommand(engine.Select))
 
 	run := leaf("run", "Select and run tests")
 	selectFlags(run)
@@ -116,10 +115,7 @@ func NewRoot() *cobra.Command {
 	audit.Flags().Bool("bisect", false, "bisect suspected misses")
 	root.AddCommand(audit)
 
-	explain := leaf("explain", "Explain one test decision")
-	explain.Flags().String("test", "", "stable test ID")
-	explain.Flags().String("base", "", "base revision")
-	root.AddCommand(explain)
+	root.AddCommand(newExplainCommand(engine.Select))
 
 	root.AddCommand(&cobra.Command{Use: "version", Short: "Print version", RunE: func(cmd *cobra.Command, _ []string) error {
 		_, err := fmt.Fprintf(cmd.OutOrStdout(), "hazard %s\n", version)
