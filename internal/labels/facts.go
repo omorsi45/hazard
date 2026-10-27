@@ -55,6 +55,10 @@ type observation struct {
 	InfraReason, MessageSHA256            string
 	SuiteIncomplete, DiagnosticsTruncated bool
 	ObservedAt                            string
+	// Promoted reports that acquisition keyed this record to a canonical
+	// test_results row that still exists. Collided, conflicted or withheld
+	// records have none and cannot serve as comparison witnesses.
+	Promoted bool
 
 	message string
 	art     *artifact
@@ -90,12 +94,17 @@ type run struct {
 	CreatedAt                            *string
 }
 
+// requestedWindow is one distinct acquisition window recorded on mining runs.
+// NULL and empty text stay distinct, like every other provenance fact.
+type requestedWindow struct{ Since, Until *string }
+
 // facts is every classification input read from one consistent snapshot.
 type facts struct {
 	Provider, Project string
 	Artifacts         []*artifact
 	Observations      []*observation
 	Runs              []*run
+	Windows           []*requestedWindow
 	Gaps              []*gap
 	Exclusions        []*acquisitionExclusion
 	Flagged           []*flaggedTest
@@ -121,6 +130,14 @@ func nullString(n sql.NullString) *string {
 		return nil
 	}
 	return &n.String
+}
+
+// windowKey keeps NULL and empty text distinct when deduplicating windows.
+func windowKey(n sql.NullString) string {
+	if !n.Valid {
+		return "null"
+	}
+	return "text:" + n.String
 }
 
 func nullInt(n sql.NullInt64) *int {
@@ -164,9 +181,13 @@ func loadFacts(ctx context.Context, q querier, cutoff time.Time) (_ *facts, err 
 		return nil, fmt.Errorf("read artifacts: %w", err)
 	}
 
-	rows, err = q.QueryContext(ctx, `SELECT provider,project,unit_key,content_sha256,artifact_entry,case_ordinal,status,test_id,identity_error,unstable_id,
-		infra_reason,raw_message,suite_incomplete,diagnostics_truncated,observed_at FROM ci_observations
-		ORDER BY provider,project,unit_key,content_sha256,artifact_entry,case_ordinal`)
+	rows, err = q.QueryContext(ctx, `SELECT o.provider,o.project,o.unit_key,o.content_sha256,o.artifact_entry,o.case_ordinal,o.status,o.test_id,o.identity_error,o.unstable_id,
+		o.infra_reason,o.raw_message,o.suite_incomplete,o.diagnostics_truncated,o.observed_at,
+		(o.result_key IS NOT NULL AND EXISTS(SELECT 1 FROM ci_artifacts a JOIN test_results r ON r.source=o.provider AND r.project=o.project AND r.commit_sha=a.tested_sha
+			AND r.test_id=o.test_id AND r.pipeline_id=a.run_id AND r.job_id=a.job_id AND r.environment_id=a.environment_id AND r.attempt=coalesce(a.attempt,1) AND r.artifact_id=coalesce(a.artifact_id,'')
+			WHERE a.provider=o.provider AND a.project=o.project AND a.unit_key=o.unit_key AND a.content_sha256=o.content_sha256))
+		FROM ci_observations o
+		ORDER BY o.provider,o.project,o.unit_key,o.content_sha256,o.artifact_entry,o.case_ordinal`)
 	if err != nil {
 		return nil, fmt.Errorf("read observations: %w", err)
 	}
@@ -175,7 +196,7 @@ func loadFacts(ctx context.Context, q querier, cutoff time.Time) (_ *facts, err 
 		o := &observation{}
 		var message string
 		if err := rows.Scan(&o.Provider, &o.Project, &o.UnitKey, &o.ContentSHA256, &o.ArtifactEntry, &o.CaseOrdinal, &o.Status, &o.TestID, &o.IdentityError,
-			&o.Unstable, &o.InfraReason, &message, &o.SuiteIncomplete, &o.DiagnosticsTruncated, &o.ObservedAt); err != nil {
+			&o.Unstable, &o.InfraReason, &message, &o.SuiteIncomplete, &o.DiagnosticsTruncated, &o.ObservedAt, &o.Promoted); err != nil {
 			return nil, closeWith(rows, fmt.Errorf("scan observation: %w", err))
 		}
 		at, err := parseTime(o.ObservedAt)
@@ -216,20 +237,27 @@ func loadFacts(ctx context.Context, q querier, cutoff time.Time) (_ *facts, err 
 // cannot be silently dropped because its local time is unknown. Acquisition
 // exclusions belong to a source report, so they follow that report's time.
 func (f *facts) loadAnnotations(ctx context.Context, q querier, cutoff time.Time) error {
-	rows, err := q.QueryContext(ctx, `SELECT provider,project,run_id,attempt_key,attempt,source_head_sha,branch,created_at,state FROM mining_runs
+	rows, err := q.QueryContext(ctx, `SELECT provider,project,run_id,attempt_key,attempt,source_head_sha,branch,created_at,requested_since,requested_until,state FROM mining_runs
 		ORDER BY provider,project,run_id,attempt_key`)
 	if err != nil {
 		return fmt.Errorf("read mining runs: %w", err)
 	}
+	windows := map[[2]string]bool{}
 	for rows.Next() {
 		r := &run{}
 		var attempt sql.NullInt64
-		var created sql.NullString
-		if err := rows.Scan(&r.Provider, &r.Project, &r.RunID, &r.AttemptKey, &attempt, &r.SourceHeadSHA, &r.Branch, &created, &r.State); err != nil {
+		var created, since, until sql.NullString
+		if err := rows.Scan(&r.Provider, &r.Project, &r.RunID, &r.AttemptKey, &attempt, &r.SourceHeadSHA, &r.Branch, &created, &since, &until, &r.State); err != nil {
 			return closeWith(rows, fmt.Errorf("scan mining run: %w", err))
 		}
 		r.Attempt, r.CreatedAt = nullInt(attempt), nullString(created)
 		f.Runs = append(f.Runs, r)
+		// The window is classification input only as the set of distinct
+		// windows, so which attempt carries which request does not matter.
+		if key := [2]string{windowKey(since), windowKey(until)}; !windows[key] {
+			windows[key] = true
+			f.Windows = append(f.Windows, &requestedWindow{Since: nullString(since), Until: nullString(until)})
+		}
 	}
 	if err := closeWith(rows, rows.Err()); err != nil {
 		return fmt.Errorf("read mining runs: %w", err)
@@ -275,21 +303,28 @@ func (f *facts) loadAnnotations(ctx context.Context, q querier, cutoff time.Time
 	if err := closeWith(rows, rows.Err()); err != nil {
 		return fmt.Errorf("read acquisition exclusions: %w", err)
 	}
-	rows, err = q.QueryContext(ctx, `SELECT id,quarantined,unstable_id FROM tests WHERE quarantined!=0 OR unstable_id!=0 ORDER BY id`)
+	f.Flagged, err = readFlagged(ctx, q)
+	return err
+}
+
+// readFlagged reads the manual inventory flags that force a test to always run.
+func readFlagged(ctx context.Context, q querier) ([]*flaggedTest, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id,quarantined,unstable_id FROM tests WHERE quarantined!=0 OR unstable_id!=0 ORDER BY id`)
 	if err != nil {
-		return fmt.Errorf("read test flags: %w", err)
+		return nil, fmt.Errorf("read test flags: %w", err)
 	}
+	var out []*flaggedTest
 	for rows.Next() {
 		t := &flaggedTest{}
 		if err := rows.Scan(&t.ID, &t.Quarantined, &t.UnstableID); err != nil {
-			return closeWith(rows, fmt.Errorf("scan test flag: %w", err))
+			return nil, closeWith(rows, fmt.Errorf("scan test flag: %w", err))
 		}
-		f.Flagged = append(f.Flagged, t)
+		out = append(out, t)
 	}
 	if err := closeWith(rows, rows.Err()); err != nil {
-		return fmt.Errorf("read test flags: %w", err)
+		return nil, fmt.Errorf("read test flags: %w", err)
 	}
-	return nil
+	return out, nil
 }
 
 func closeWith(rows *sql.Rows, err error) error {

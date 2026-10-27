@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -26,7 +27,9 @@ const (
 )
 
 // Options selects the evaluation cutoff. Before is an exclusive UTC instant
-// applied to source observation timestamps, never to acquisition clocks.
+// applied to source observation timestamps, never to acquisition clocks. It must
+// be exactly a UTC midnight, the granularity the stored cutoff and the build
+// identity keep, so a freshly built cohort never reads as stale.
 type Options struct{ Before time.Time }
 
 // Report is the count and identity summary of one frozen build.
@@ -65,6 +68,9 @@ func Build(ctx context.Context, db *sql.DB, opts Options) (_ Report, err error) 
 		return Report{}, errors.New("labels: Before cutoff is required")
 	}
 	before := opts.Before.UTC()
+	if hour, minute, second := before.Clock(); hour != 0 || minute != 0 || second != 0 || before.Nanosecond() != 0 {
+		return Report{}, fmt.Errorf("labels: Before cutoff must be a UTC midnight, got %s", before.Format(time.RFC3339Nano))
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return Report{}, fmt.Errorf("begin label build: %w", err)
@@ -134,14 +140,54 @@ func ReadStats(ctx context.Context, db *sql.DB) (_ Report, err error) {
 	if algorithm != AlgorithmVersion || digest != inputDigest || provider != f.Provider || project != f.Project {
 		freshness = FreshnessStale
 	}
-	return readReport(ctx, tx, id, freshness)
+	report, err := readReport(ctx, tx, id, freshness)
+	if err != nil {
+		return Report{}, err
+	}
+	if freshness == FreshnessStale {
+		// The frozen set may predate a manual flag, which is often the very edit
+		// that made the build stale. Never report fewer always-run tests than the
+		// live inventory flags demand.
+		report.AlwaysRunTests = unionSorted(report.AlwaysRunTests, flaggedIDs(f.Flagged))
+	}
+	return report, nil
 }
 
-// unavailableReport reports live acquisition facts only. Eligibility counts are
-// zero because no cohort exists, which Freshness and Limitations say explicitly.
+// flaggedIDs lists the IDs of manually quarantined or unstable-identity tests.
+func flaggedIDs(flagged []*flaggedTest) []string {
+	ids := make([]string, 0, len(flagged))
+	for _, t := range flagged {
+		ids = append(ids, t.ID)
+	}
+	return ids
+}
+
+// unionSorted returns the sorted, de-duplicated union of two ID lists.
+func unionSorted(a, b []string) []string {
+	set := make(map[string]bool, len(a)+len(b))
+	for _, id := range append(append([]string{}, a...), b...) {
+		set[id] = true
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// unavailableReport reports live acquisition facts and manual always-run flags
+// only. Eligibility counts are zero because no cohort exists, which Freshness
+// and Limitations say explicitly. Always-run membership is independent of label
+// eligibility, so the readable manual flags are still listed.
 func unavailableReport(ctx context.Context, q querier) (Report, error) {
 	r := newReport()
 	r.Freshness = FreshnessUnavailable
+	flagged, err := readFlagged(ctx, q)
+	if err != nil {
+		return Report{}, err
+	}
+	r.AlwaysRunTests = unionSorted(nil, flaggedIDs(flagged))
 	if err := q.QueryRowContext(ctx, "SELECT count(*) FROM acquisition_gaps WHERE resolved_at IS NULL").Scan(&r.ActiveGaps); err != nil {
 		return Report{}, fmt.Errorf("count active gaps: %w", err)
 	}

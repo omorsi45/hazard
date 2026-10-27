@@ -224,15 +224,19 @@ func (g *graph) descendants(n nodeKey) []string {
 
 // index holds the comparison witnesses of the retained observations.
 type index struct {
-	// passes: complete, execution-verified passes with known identity, tested
-	// revision and environment, keyed by the full comparison identity.
+	// passes: canonical, complete, execution-verified passes with known identity,
+	// tested revision and environment, keyed by the full comparison identity.
 	passes map[groupKey][]*observation
+	// uncanonical: passes with the same comparable shape that cannot serve as
+	// witnesses because acquisition collided, conflicted or never promoted them.
+	uncanonical map[groupKey][]*observation
 	// byCommit: every observation of a test at a tested revision, any status.
+	// It feeds the flaky rule, where ambiguity must still count as a signal.
 	byCommit map[commitTest][]*observation
 }
 
-func buildIndex(f *facts) *index {
-	idx := &index{passes: map[groupKey][]*observation{}, byCommit: map[commitTest][]*observation{}}
+func buildIndex(f *facts, lk *lookup) *index {
+	idx := &index{passes: map[groupKey][]*observation{}, uncanonical: map[groupKey][]*observation{}, byCommit: map[commitTest][]*observation{}}
 	for _, o := range f.Observations {
 		sha := o.testedSHA()
 		if !hasKnownIdentity(o) || sha == "" {
@@ -241,7 +245,11 @@ func buildIndex(f *facts) *index {
 		idx.byCommit[commitTest{o.Provider, o.Project, sha, o.TestID}] = append(idx.byCommit[commitTest{o.Provider, o.Project, sha, o.TestID}], o)
 		if env := o.environment(); o.Status == "pass" && env != "" && o.completeWitness() {
 			key := groupKey{o.Provider, o.Project, sha, o.TestID, env}
-			idx.passes[key] = append(idx.passes[key], o)
+			if lk.canonical(o) {
+				idx.passes[key] = append(idx.passes[key], o)
+			} else {
+				idx.uncanonical[key] = append(idx.uncanonical[key], o)
+			}
 		}
 	}
 	return idx
@@ -294,6 +302,14 @@ func buildLookup(f *facts) *lookup {
 		}
 	}
 	return lk
+}
+
+// canonical reports whether acquisition left a canonical promoted result for an
+// observation. A record whose legacy key collided, whose unit holds an active
+// acquisition conflict, or that was never promoted to test_results has none, so
+// a pass in it is ambiguous evidence that cannot complete a comparison.
+func (lk *lookup) canonical(o *observation) bool {
+	return o.Promoted && !lk.collisions[o.obsKey] && !lk.conflictUnits[unitKey{o.Provider, o.Project, o.UnitKey}]
 }
 
 // applyMemberDisqualifiers records every known positive disqualifier of the
@@ -457,7 +473,8 @@ func classify(f *facts) []*decision {
 		key := groupKey{o.Provider, o.Project, sha, o.TestID, env}
 		groups[key] = append(groups[key], o)
 	}
-	g, idx, lk := buildGraph(f), buildIndex(f), buildLookup(f)
+	lk := buildLookup(f)
+	g, idx := buildGraph(f), buildIndex(f, lk)
 	for _, d := range unresolved {
 		applyMemberDisqualifiers(d, lk)
 		d.resolve()
@@ -482,9 +499,10 @@ func classify(f *facts) []*decision {
 	return out
 }
 
-// evaluateParent requires a comparable complete pass at a single known,
-// unambiguous immediate parent. Unknown or contradictory parent facts, a root,
-// a merge, or an unavailable comparison keep the candidate pending.
+// evaluateParent requires a comparable complete canonical pass at a single
+// known, unambiguous immediate parent. Unknown or contradictory parent facts, a
+// root, a merge, or an unavailable or non-canonical comparison keep the
+// candidate pending.
 func evaluateParent(d *decision, g *graph, idx *index) {
 	parents, state := g.parentsOf(nodeKey{d.Provider, d.Project, d.SHA})
 	own := refs(d.Members)
@@ -499,7 +517,8 @@ func evaluateParent(d *decision, g *graph, idx *index) {
 		d.add("merge_ambiguity", effectPending, own...)
 	default:
 		parent := parents[0]
-		if witnesses := idx.passes[groupKey{d.Provider, d.Project, parent, d.TestID, d.Env}]; len(witnesses) > 0 {
+		key := groupKey{d.Provider, d.Project, parent, d.TestID, d.Env}
+		if witnesses := idx.passes[key]; len(witnesses) > 0 {
 			d.Evidence.ParentSHA, d.Evidence.ParentPass = parent, firstByRef(witnesses).ref()
 			return
 		}
@@ -509,6 +528,8 @@ func evaluateParent(d *decision, g *graph, idx *index) {
 			d.add("missing_parent_observation", effectPending, own...)
 		case comparableFailure(observed, d.Env):
 			d.add("parent_not_passing", effectPending, refs(observed)...)
+		case len(idx.uncanonical[key]) > 0:
+			d.add("parent_pass_not_canonical", effectPending, refs(idx.uncanonical[key])...)
 		default:
 			d.add("parent_comparison_unavailable", effectPending, refs(observed)...)
 		}
@@ -524,9 +545,9 @@ func comparableFailure(observed []*observation, env string) bool {
 	return false
 }
 
-// evaluateRecovery looks for a later comparable complete pass at a verified
-// descendant on the same nonempty observed branch. Its absence is the only
-// predicate whose failure leaves a candidate weak rather than pending.
+// evaluateRecovery looks for a later comparable complete canonical pass at a
+// verified descendant on the same nonempty observed branch. Its absence is the
+// only predicate whose failure leaves a candidate weak rather than pending.
 func evaluateRecovery(d *decision, g *graph, idx *index) {
 	if d.Branch != "" {
 		for _, sha := range g.descendants(nodeKey{d.Provider, d.Project, d.SHA}) {

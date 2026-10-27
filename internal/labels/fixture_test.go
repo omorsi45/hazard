@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -34,6 +35,14 @@ type spec struct {
 	At                                                                        time.Time
 	Ordinal                                                                   int
 	NoEnv, NoEnvEvidence, NoSHA, NoTestID, NoExec, Unstable, Suite, Trunc     bool
+	NoPromote                                                                 bool // skip the canonical test_results row mining would write
+}
+
+// legacyKey mirrors the 0001 primary key that mining stores, as JSON, in
+// ci_observations.result_key and writes as the canonical test_results row.
+type legacyKey struct {
+	Source, Project, SHA, TestID, RunID, JobID, EnvironmentID, ArtifactID string
+	Attempt                                                               int
 }
 
 type fixture struct {
@@ -143,12 +152,31 @@ func (f *fixture) obs(s spec) string {
 	if s.NoTestID {
 		testID, identityError = "", "unsupported identity"
 	}
+	// Mining keys a raw record to its canonical test_results row only when the
+	// identity, tested revision and execution facts are all known.
+	var resultKey any
+	key := legacyKey{Source: f.provider, Project: f.project, SHA: s.SHA, TestID: s.Test, RunID: s.Run, JobID: s.Job, ArtifactID: "artifact-" + unit, Attempt: s.Attempt}
+	if !s.NoEnv && !s.NoEnvEvidence {
+		key.EnvironmentID = s.Env
+	}
+	keyed := !s.NoTestID && !s.NoSHA && !s.NoExec
+	if keyed {
+		encoded, err := json.Marshal(key)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		resultKey = string(encoded)
+	}
 	f.exec(`INSERT INTO ci_observations(provider,project,unit_key,content_sha256,artifact_entry,entry_sha256,case_ordinal,raw_suite,raw_name,raw_classname,raw_file,
 		status,raw_message,raw_type,raw_properties_json,suite_incomplete,diagnostics_truncated,test_id,identity_language,identity_package,identity_name,identity_file,
-		identity_runner_id,unstable_id,identity_reason,identity_error,infra_reason,observed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		identity_runner_id,unstable_id,identity_reason,identity_error,infra_reason,result_key,observed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		f.provider, f.project, unit, content, "report.xml", content, s.Ordinal, "suite", "name", "class", "file.go",
-		s.Status, s.Message, "", "{}", s.Suite, s.Trunc, testID, "go", "p", "TestAlpha", "file.go", "", s.Unstable, "", identityError, s.Infra, at)
+		s.Status, s.Message, "", "{}", s.Suite, s.Trunc, testID, "go", "p", "TestAlpha", "file.go", "", s.Unstable, "", identityError, s.Infra, resultKey, at)
+	if keyed && !s.NoPromote {
+		f.exec(`INSERT INTO test_results(source,project,commit_sha,test_id,pipeline_id,job_id,environment_id,attempt,artifact_id,status,observed_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?)`, key.Source, key.Project, key.SHA, key.TestID, key.RunID, key.JobID, key.EnvironmentID, key.Attempt, key.ArtifactID, s.Status, at)
+	}
 	f.units = append(f.units, unit)
 	attemptKey := strconv.Itoa(s.Attempt)
 	f.exec(`INSERT INTO mining_runs(provider,project,run_id,attempt_key,attempt,source_head_sha,branch,state,observed_at) VALUES(?,?,?,?,?,?,?,?,?)
@@ -186,6 +214,13 @@ func (f *fixture) exclusion(unit, reason string) {
 	}
 	f.exec(`INSERT INTO acquisition_exclusions(provider,project,unit_key,content_sha256,artifact_entry,case_ordinal,reason,detail,observed_at) VALUES(?,?,?,?,?,?,?,?,?)`,
 		f.provider, f.project, unit, content, "report.xml", 0, reason, "detail", baseTime.Format(testObservationFormat))
+}
+
+// unpromote removes the canonical test_results row of a raw record, as when
+// mining withheld or deleted its promotion after the fact.
+func (f *fixture) unpromote(unit string) {
+	f.t.Helper()
+	f.exec(`DELETE FROM test_results WHERE artifact_id=?`, "artifact-"+unit)
 }
 
 func (f *fixture) flag(test, column string) {

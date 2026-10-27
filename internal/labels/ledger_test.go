@@ -105,6 +105,119 @@ func TestBuildRejectsMissingCutoff(t *testing.T) {
 	}
 }
 
+func TestBuildRejectsACutoffThatIsNotAUTCMidnight(t *testing.T) {
+	f := newFixture(t)
+	// A closed database fails any statement, so only validation that runs before
+	// the database is touched can produce the midnight error.
+	if err := f.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	zone := time.FixedZone("EST", -5*3600)
+	for name, before := range map[string]time.Time{
+		"one nanosecond past midnight":       cutoff.Add(time.Nanosecond),
+		"half a second past midnight":        cutoff.Add(500 * time.Millisecond),
+		"one second past midnight":           cutoff.Add(time.Second),
+		"one minute past midnight":           cutoff.Add(time.Minute),
+		"noon":                               cutoff.Add(12 * time.Hour),
+		"midnight in a zone west of UTC":     time.Date(2026, 1, 1, 0, 0, 0, 0, zone),
+		"midnight UTC minus one nanosecond":  cutoff.Add(-time.Nanosecond),
+		"a non-midnight instant in the past": time.Date(2025, 12, 31, 13, 30, 0, 0, time.UTC),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Build(context.Background(), f.db, Options{Before: before})
+			if err == nil || !strings.Contains(err.Error(), "UTC midnight") {
+				t.Errorf("Build error = %v, want a UTC midnight validation error", err)
+			}
+		})
+	}
+}
+
+func TestBuildAcceptsAnyRepresentationOfUTCMidnight(t *testing.T) {
+	f := newFixture(t)
+	f.standard()
+	zone := time.FixedZone("EST", -5*3600)
+	local := time.Date(2025, 12, 31, 19, 0, 0, 0, zone) // 2026-01-01T00:00:00Z
+	r, err := Build(context.Background(), f.db, Options{Before: local})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if r.Cutoff != "2026-01-01T00:00:00Z" || r.BuildID != f.build().BuildID {
+		t.Errorf("cutoff = %q, want the same build as the UTC midnight", r.Cutoff)
+	}
+}
+
+func TestRequestedWindowsEnterTheDigestAsADistinctSet(t *testing.T) {
+	const (
+		jun, jul, aug = "2025-06-01T00:00:00Z", "2025-07-01T00:00:00Z", "2025-08-01T00:00:00Z"
+		widened       = "2025-05-01T00:00:00Z"
+	)
+	setWindow := func(f *fixture, run, since, until string) {
+		f.exec(`UPDATE mining_runs SET requested_since=?, requested_until=? WHERE run_id=?`, since, until, run)
+	}
+	windows := func(f *fixture) int {
+		facts, err := loadFacts(context.Background(), f.db, cutoff)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		return len(facts.Windows)
+	}
+	t.Run("a widened window changes the digest and the build", func(t *testing.T) {
+		f := newFixture(t)
+		f.standard()
+		for _, run := range []string{"run-p1", "run-c1", "run-d1"} {
+			setWindow(f, run, jun, jul)
+		}
+		narrow := f.build()
+		for _, run := range []string{"run-p1", "run-c1", "run-d1"} {
+			setWindow(f, run, widened, jul)
+		}
+		if got := f.stats(); got.Freshness != FreshnessStale || got.BuildID != narrow.BuildID {
+			t.Errorf("widened window: stats = %s on %s, want stale on %s", got.Freshness, got.BuildID, narrow.BuildID)
+		}
+		wide := f.build()
+		if wide.InputDigest == narrow.InputDigest || wide.BuildID == narrow.BuildID {
+			t.Error("a widened acquisition window did not change the input digest")
+		}
+	})
+	t.Run("the same window on every attempt is one distinct window", func(t *testing.T) {
+		f := newFixture(t)
+		f.standard()
+		for _, run := range []string{"run-p1", "run-c1", "run-d1"} {
+			setWindow(f, run, jun, jul)
+		}
+		if got := windows(f); got != 1 {
+			t.Errorf("distinct windows = %d, want 1", got)
+		}
+		setWindow(f, "run-d1", jul, aug)
+		if got := windows(f); got != 2 {
+			t.Errorf("distinct windows = %d, want 2", got)
+		}
+	})
+	t.Run("only the set matters, not which attempt carries which window", func(t *testing.T) {
+		a, b := newFixture(t), newFixture(t)
+		a.standard()
+		b.standard()
+		setWindow(a, "run-p1", jun, jul)
+		setWindow(a, "run-d1", jul, aug)
+		setWindow(b, "run-p1", jul, aug)
+		setWindow(b, "run-d1", jun, jul)
+		if x, y := a.build(), b.build(); x.InputDigest != y.InputDigest {
+			t.Error("swapping windows between attempts changed the digest")
+		}
+	})
+	t.Run("an absent window differs from an empty one", func(t *testing.T) {
+		f := newFixture(t)
+		f.standard()
+		absent := f.build()
+		for _, run := range []string{"run-p1", "run-c1", "run-d1"} {
+			setWindow(f, run, "", "")
+		}
+		if again := f.build(); again.InputDigest == absent.InputDigest {
+			t.Error("NULL and empty windows digest identically")
+		}
+	})
+}
+
 func TestReportCarriesAcquisitionAccounting(t *testing.T) {
 	f := newFixture(t)
 	f.standard()
@@ -155,6 +268,7 @@ func TestInputDigestTracksClassificationInputsOnly(t *testing.T) {
 		{"another passing comparison observation", func(f *fixture) { f.obs(spec{SHA: "p1", Run: "run-p1b", Status: "pass"}) }, true},
 		{"manual quarantine", func(f *fixture) { f.flag(testAlpha, "quarantined") }, true},
 		{"manual unstable annotation", func(f *fixture) { f.flag(testAlpha, "unstable_id") }, true},
+		{"canonical promotion of a witness removed", func(f *fixture) { f.unpromote("unit-1") }, true},
 		{"provenance enrichment", func(f *fixture) {
 			f.exec(`UPDATE ci_artifacts SET environment_evidence='stronger proof' WHERE unit_key='unit-2'`)
 		}, true},
@@ -271,6 +385,68 @@ func TestReadStatsReportsUnavailableWithoutABuild(t *testing.T) {
 	}
 	if r.CandidateReasonCounts == nil || r.AlwaysRunTests == nil || r.Limitations == nil {
 		t.Error("collections must be non-nil for JSON")
+	}
+}
+
+func TestUnavailableStatsStillReportManuallyFlaggedAlwaysRunTests(t *testing.T) {
+	f := newFixture(t)
+	f.standard()
+	f.flag(testBeta, "quarantined")
+	f.flag(testAlpha, "unstable_id")
+	f.flag(testAlpha, "quarantined") // both flags on one test list it once
+	r := f.stats()
+	if r.Freshness != FreshnessUnavailable || r.BuildID != "" {
+		t.Fatalf("no build must report unavailable: %+v", r)
+	}
+	if want := []string{testAlpha, testBeta}; !reflect.DeepEqual(r.AlwaysRunTests, want) {
+		t.Errorf("always_run_tests = %v, want %v (an empty list would read as no test must run)", r.AlwaysRunTests, want)
+	}
+	if f.ledgerRows() != [5]int{} {
+		t.Error("ReadStats created label rows")
+	}
+}
+
+func TestStaleStatsListNewlyFlaggedTestsBesideTheFrozenSet(t *testing.T) {
+	f := newFixture(t)
+	f.standard()
+	f.obs(spec{SHA: "c1", Run: "run-c1-pass", Parents: ps("p1"), Status: "pass"}) // TestAlpha is flaky at c1
+	f.flag(testBeta, "unstable_id")
+	built := f.build()
+	if want := []string{testAlpha, testBeta}; !reflect.DeepEqual(built.AlwaysRunTests, want) {
+		t.Fatalf("built always_run_tests = %v, want %v", built.AlwaysRunTests, want)
+	}
+	const gamma = "go:p:TestGamma"
+	f.flag(gamma, "quarantined") // the edit that makes the build stale
+	f.exec(`UPDATE tests SET quarantined=0, unstable_id=0 WHERE id=?`, testBeta)
+	before := f.ledgerRows()
+	r := f.stats()
+	if r.Freshness != FreshnessStale || r.BuildID != built.BuildID {
+		t.Fatalf("stats = %s on %s, want stale on %s", r.Freshness, r.BuildID, built.BuildID)
+	}
+	// Frozen: Alpha (flaky) and Beta. Live: Gamma. The union keeps all three, sorted.
+	if want := []string{testAlpha, testBeta, gamma}; !reflect.DeepEqual(r.AlwaysRunTests, want) {
+		t.Errorf("stale always_run_tests = %v, want %v", r.AlwaysRunTests, want)
+	}
+	if f.ledgerRows() != before {
+		t.Error("ReadStats wrote rows")
+	}
+	var frozen string
+	if err := f.db.QueryRow(`SELECT always_run_json FROM label_builds WHERE build_id=?`, built.BuildID).Scan(&frozen); err != nil || strings.Contains(frozen, "TestGamma") {
+		t.Errorf("stale stats must not rewrite the frozen set: %q (%v)", frozen, err)
+	}
+}
+
+func TestStaleStatsListANewQuarantineOfAnOtherwiseUnlistedTest(t *testing.T) {
+	f := newFixture(t)
+	f.standard()
+	built := f.build()
+	if len(built.AlwaysRunTests) != 0 {
+		t.Fatalf("built always_run_tests = %v, want none", built.AlwaysRunTests)
+	}
+	f.flag(testAlpha, "quarantined")
+	r := f.stats()
+	if r.Freshness != FreshnessStale || !reflect.DeepEqual(r.AlwaysRunTests, []string{testAlpha}) {
+		t.Errorf("stale stats after a quarantine edit: freshness=%s always_run=%v, want stale [%s]", r.Freshness, r.AlwaysRunTests, testAlpha)
 	}
 }
 

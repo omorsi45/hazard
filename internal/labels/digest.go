@@ -29,6 +29,7 @@ type inputSnapshot struct {
 	Artifacts    []*artifact       `json:"artifacts"`
 	Observations []*observation    `json:"observations"`
 	Runs         []json.RawMessage `json:"runs"`
+	Windows      []json.RawMessage `json:"requested_windows"`
 	Gaps         []json.RawMessage `json:"gaps"`
 	Exclusions   []json.RawMessage `json:"exclusions"`
 	Flagged      []json.RawMessage `json:"flagged"`
@@ -69,6 +70,7 @@ func (f *facts) inputDigest() (string, error) {
 		build  func() ([]json.RawMessage, error)
 	}{
 		{&snapshot.Runs, func() ([]json.RawMessage, error) { return canonical(f.Runs) }},
+		{&snapshot.Windows, func() ([]json.RawMessage, error) { return canonical(f.Windows) }},
 		{&snapshot.Gaps, func() ([]json.RawMessage, error) { return canonical(f.Gaps) }},
 		{&snapshot.Exclusions, func() ([]json.RawMessage, error) { return canonical(f.Exclusions) }},
 		{&snapshot.Flagged, func() ([]json.RawMessage, error) { return canonical(f.Flagged) }},

@@ -90,6 +90,64 @@ func TestParentAndRecoveryPredicates(t *testing.T) {
 	})
 }
 
+// Standard history units: unit-1 is the parent pass (run-p1), unit-2 the failing
+// candidate (run-c1) and unit-3 the descendant pass (run-d1).
+func TestWitnessesMustBeCanonicalPromotedResults(t *testing.T) {
+	collide := func(unit string) func(f *fixture) {
+		return func(f *fixture) { f.exclusion(unit, "duplicate_test_identity") }
+	}
+	conflict := func(run, unit string) func(f *fixture) {
+		return func(f *fixture) { f.gap(run, unit, "acquisition_conflict", true) }
+	}
+	notCanonicalParent := map[string]string{"parent_pass_not_canonical": "pending"}
+	noRecovery := map[string]string{"no_passing_descendant": "weak"}
+	runStateCases(t, []stateCase{
+		{name: "parent pass with a duplicate_test_identity exclusion cannot satisfy the parent", state: "pending",
+			extra: collide("unit-1"), reasons: notCanonicalParent},
+		{name: "descendant pass with a duplicate_test_identity exclusion is not recovery", state: "weak",
+			extra: collide("unit-3"), reasons: noRecovery},
+		{name: "parent pass in a unit with an active acquisition_conflict gap cannot satisfy the parent", state: "pending",
+			extra: conflict("run-p1", "unit-1"), reasons: notCanonicalParent},
+		{name: "descendant pass in a unit with an active acquisition_conflict gap is not recovery", state: "weak",
+			extra: conflict("run-d1", "unit-3"), reasons: noRecovery},
+		{name: "parent pass that was not promoted to test_results cannot satisfy the parent", state: "pending",
+			mods:    []mod{func(p, c, d *spec) { p.NoPromote = true }},
+			reasons: notCanonicalParent},
+		{name: "descendant pass that was not promoted to test_results is not recovery", state: "weak",
+			mods:    []mod{func(p, c, d *spec) { d.NoPromote = true }},
+			reasons: noRecovery},
+		{name: "a resolved conflict gap does not disqualify a witness", state: "strong",
+			extra: func(f *fixture) { f.gap("run-p1", "unit-1", "acquisition_conflict", false) }},
+		{name: "a canonical parent pass still satisfies the parent beside a colliding one", state: "strong",
+			extra: func(f *fixture) {
+				f.obs(spec{SHA: "p1", Run: "run-p1b", Parents: ps("p0"), Status: "pass"})
+				f.exclusion("unit-1", "duplicate_test_identity")
+			}},
+		{name: "a canonical descendant pass still recovers beside a colliding one", state: "strong",
+			extra: func(f *fixture) {
+				f.obs(spec{SHA: "d1", Run: "run-d1b", Parents: ps("c1"), Status: "pass"})
+				f.exclusion("unit-3", "duplicate_test_identity")
+			}},
+		{name: "a colliding same-commit pass is still a flaky signal", state: "excluded",
+			extra: func(f *fixture) {
+				unit := f.obs(spec{SHA: "c1", Run: "run-c1-pass", Parents: ps("p1"), Status: "pass"})
+				f.exclusion(unit, "duplicate_test_identity")
+			},
+			reasons: map[string]string{"flaky_same_commit": "exclude"}},
+		{name: "a same-commit pass in a conflicted unit is still a flaky signal", state: "excluded",
+			extra: func(f *fixture) {
+				unit := f.obs(spec{SHA: "c1", Run: "run-c1-pass", Parents: ps("p1"), Status: "pass"})
+				f.gap("run-c1-pass", unit, "acquisition_conflict", true)
+			},
+			reasons: map[string]string{"flaky_same_commit": "exclude"}},
+		{name: "an unpromoted same-commit pass is still a flaky signal", state: "excluded",
+			extra: func(f *fixture) {
+				f.obs(spec{SHA: "c1", Run: "run-c1-pass", Parents: ps("p1"), Status: "pass", NoPromote: true})
+			},
+			reasons: map[string]string{"flaky_same_commit": "exclude"}},
+	})
+}
+
 func TestEveryAttemptAtTheCommitGroupsIntoOneCandidate(t *testing.T) {
 	f := newFixture(t)
 	f.standard()

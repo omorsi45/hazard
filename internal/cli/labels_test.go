@@ -301,11 +301,23 @@ func seedLabelsHistory(t *testing.T) *store.Store {
 			execution_evidence,environment_evidence,raw_blob_path,source_head_sha,branch,tested_parent_shas_json,tested_kinds_json,suite_incomplete,diagnostics_truncated,state,observed_at)
 			VALUES('github','o/r',?,?,?,?,?,1,'linux',?,'rev','exec','env','raw/x',?,'main',?,'null',0,0,'complete',?)`,
 			unit, content, run, "artifact-"+unit, "job-"+unit, c.sha, c.sha, c.parents, at)
+		// Mining keys every verified record to a canonical test_results row;
+		// only such promoted passes can complete a comparison.
+		key := struct {
+			Source, Project, SHA, TestID, RunID, JobID, EnvironmentID, ArtifactID string
+			Attempt                                                               int
+		}{"github", "o/r", c.sha, "go:p:TestAlpha", run, "job-" + unit, "linux", "artifact-" + unit, 1}
+		encoded, err := json.Marshal(key)
+		if err != nil {
+			t.Fatal(err)
+		}
 		mustExec(t, db, `INSERT INTO ci_observations(provider,project,unit_key,content_sha256,artifact_entry,entry_sha256,case_ordinal,raw_suite,raw_name,raw_classname,raw_file,status,
 			raw_message,raw_type,raw_properties_json,suite_incomplete,diagnostics_truncated,test_id,identity_language,identity_package,identity_name,identity_file,identity_runner_id,
-			unstable_id,identity_reason,identity_error,infra_reason,observed_at)
-			VALUES('github','o/r',?,?,'report.xml',?,0,'s','n','c','f.go',?,'assertion','','{}',0,0,'go:p:TestAlpha','go','p','TestAlpha','f.go','',0,'','','',?)`,
-			unit, content, content, c.status, at)
+			unstable_id,identity_reason,identity_error,infra_reason,result_key,observed_at)
+			VALUES('github','o/r',?,?,'report.xml',?,0,'s','n','c','f.go',?,'assertion','','{}',0,0,'go:p:TestAlpha','go','p','TestAlpha','f.go','',0,'','','',?,?)`,
+			unit, content, content, c.status, string(encoded), at)
+		mustExec(t, db, `INSERT INTO test_results(source,project,commit_sha,test_id,pipeline_id,job_id,environment_id,attempt,artifact_id,status,observed_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?)`, key.Source, key.Project, key.SHA, key.TestID, key.RunID, key.JobID, key.EnvironmentID, key.Attempt, key.ArtifactID, c.status, at)
 	}
 	return s
 }
@@ -352,6 +364,9 @@ func TestLabelsEndToEndAgainstTheRealStore(t *testing.T) {
 	stale := runLabelsJSON(t, "labels", "stats")
 	if stale.Freshness != labels.FreshnessStale || stale.BuildID != built.BuildID || stale.StrongCandidates != 1 {
 		t.Errorf("quarantine edit must make the build stale without rebuilding: %+v", stale)
+	}
+	if !reflect.DeepEqual(stale.AlwaysRunTests, []string{"go:p:TestAlpha"}) {
+		t.Errorf("stale stats must still list the newly quarantined test: %v", stale.AlwaysRunTests)
 	}
 	rebuilt := runLabelsJSON(t, "labels", "build", "--before", "2026-01-01")
 	if rebuilt.BuildID == built.BuildID || rebuilt.StrongCandidates != 0 || rebuilt.ExcludedCandidates != 1 || !reflect.DeepEqual(rebuilt.AlwaysRunTests, []string{"go:p:TestAlpha"}) {
