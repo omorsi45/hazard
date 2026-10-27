@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // utf8BOM is the byte order mark editors on Windows prepend to UTF-8 files. It
@@ -34,7 +36,13 @@ var (
 // reliably (unbalanced brackets or an unterminated string at end of file).
 func scanPython(src []byte) (imports []pyImport, dynamic bool, ok bool) {
 	lines, ok := logicalLines(src)
-	var aliases []string
+	// Source that is not valid UTF-8 (a Latin-1 file with a coding cookie)
+	// cannot be tokenized into identifiers, so a call of an alias could be
+	// missed. Unknown means widen: the module is dynamic.
+	if !utf8.Valid(src) {
+		dynamic = true
+	}
+	aliases := map[string]bool{}
 	for _, line := range lines {
 		if pyDynamicCall.MatchString(line) {
 			dynamic = true
@@ -44,7 +52,9 @@ func scanPython(src []byte) (imports []pyImport, dynamic bool, ok bool) {
 			if !pyStartsImp.MatchString(stmt) {
 				stmt = afterHeader(stmt)
 			}
-			aliases = append(aliases, importModuleAliases(stmt)...)
+			for _, alias := range importModuleAliases(stmt) {
+				aliases[alias] = true
+			}
 			if imp, found := parseImport(stmt); found {
 				imports = append(imports, imp...)
 			}
@@ -53,15 +63,47 @@ func scanPython(src []byte) (imports []pyImport, dynamic bool, ok bool) {
 	if !dynamic && len(aliases) > 0 {
 		// The alias can be bound after the function that calls it, so every
 		// line is checked once all bindings are known.
-		call := regexp.MustCompile(`\b(?:` + strings.Join(quoteAll(aliases), "|") + `)\s*\(`)
 		for _, line := range lines {
-			if call.MatchString(line) {
+			if callsAny(line, aliases) {
 				dynamic = true
 				break
 			}
 		}
 	}
 	return imports, dynamic, ok
+}
+
+// callsAny reports whether line calls one of names: an identifier equal to a
+// name, followed by optional white space and an opening parenthesis. The
+// identifiers are maximal runs of Unicode letters, marks, digits and
+// underscores, so "im" is not found inside "xim" or "imx". No pattern is built
+// from the source text.
+func callsAny(line string, names map[string]bool) bool {
+	for i := 0; i < len(line); {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		if !isIdentRune(r) {
+			i += size
+			continue
+		}
+		start := i
+		for i < len(line) {
+			r, size = utf8.DecodeRuneInString(line[i:])
+			if !isIdentRune(r) {
+				break
+			}
+			i += size
+		}
+		if names[line[start:i]] && strings.HasPrefix(strings.TrimLeftFunc(line[i:], unicode.IsSpace), "(") {
+			return true
+		}
+	}
+	return false
+}
+
+// isIdentRune reports whether r can be part of a Python identifier. Marks
+// (accents written as separate code points) continue an identifier.
+func isIdentRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)
 }
 
 // importModuleAliases returns the names that a statement of the form
@@ -79,14 +121,6 @@ func importModuleAliases(stmt string) []string {
 		}
 	}
 	return aliases
-}
-
-func quoteAll(names []string) []string {
-	quoted := make([]string, len(names))
-	for i, name := range names {
-		quoted[i] = regexp.QuoteMeta(name)
-	}
-	return quoted
 }
 
 // afterHeader returns the statement following the top-level colon of a

@@ -157,6 +157,25 @@ func TestPythonLoadAliasedDynamicImport(t *testing.T) {
 	}
 }
 
+func TestPythonLoadNonASCIIAliasedDynamicImport(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"app/__init__.py": "",
+		"app/latin.py":    "# -*- coding: latin-1 -*-\nfrom importlib import import_module as \xe9\n\ndef load(n):\n    return \xe9(n)\n",
+		"app/utf8.py":     "from importlib import import_module as \u00e9\n\ndef load(n):\n    return \u00e9(n)\n",
+		"app/plain.py":    "from importlib import import_module as \u00e9\n",
+	})
+	g, err := LoadPython(dir, []string{"."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]bool{"py:app.latin": true, "py:app.utf8": true, "py:app.plain": false} {
+		if got := g.Packages[id].Dynamic; got != want {
+			t.Errorf("%s Dynamic = %v, want %v", id, got, want)
+		}
+	}
+}
+
 func TestPythonLoadUnresolvableRelativeImport(t *testing.T) {
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{

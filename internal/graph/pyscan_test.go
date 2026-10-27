@@ -108,6 +108,69 @@ func TestPythonScanDynamicImports(t *testing.T) {
 	}
 }
 
+// scanRecovering calls scanPython and reports a panic as a test failure, so
+// that one bad input does not hide the verdict on the others.
+func scanRecovering(t *testing.T, name string, src string) (imports []pyImport, dynamic, ok bool) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("%s: scanPython panicked on %q: %v", name, src, r)
+		}
+	}()
+	return scanPython([]byte(src))
+}
+
+func TestPythonScanNonASCIIAliases(t *testing.T) {
+	const bind = "from importlib import import_module as "
+	for _, tc := range []struct {
+		name string
+		src  string
+		want bool // dynamic
+	}{
+		// Source that is not valid UTF-8 (a Latin-1 file with a coding cookie)
+		// cannot be matched by identifier, so the module is dynamic.
+		{"latin-1 alias", bind + "\xe9\nm = \xe9('x')\n", true},
+		{"latin-1 alias never called", bind + "\xe9\n", true},
+		{"latin-1 module alias", "import importlib as \xe9\nm = \xe9.import_module(n)\n", true},
+		{"latin-1 bytes in a comment", "# caf\xe9\nx = 1\n", true},
+		{"latin-1 bytes in a string", "x = 'caf\xe9'\n", true},
+		{"truncated utf-8 sequence", "x = 1\n# \xe2\x82\n", true},
+		// Valid non-ASCII identifiers.
+		{"accented alias", bind + "\u00e9\nm = \u00e9('x')\n", true},
+		{"accented alias, spaced call", bind + "\u00e9\nm = \u00e9 ('x')\n", true},
+		{"cyrillic alias", bind + "\u0438\u043c\nm = \u0438\u043c(n)\n", true},
+		{"cjk alias", bind + "\u5bfc\u5165\nm = \u5bfc\u5165(n)\n", true},
+		{"alias with digit and underscore", bind + "_\u00e92\nm = _\u00e92(n)\n", true},
+		{"decomposed alias", bind + "e\u0301\nm = e\u0301(n)\n", true},
+		{"accented alias used before binding", "def load(n):\n    return \u00e9(n)\n" + bind + "\u00e9\n", true},
+		{"accented alias in a parenthesized list", "from importlib import (\n    util,\n    import_module as \u00e9,\n)\nm = \u00e9(n)\n", true},
+		{"accented module alias", "import importlib as \u00e9\nm = \u00e9.import_module(n)\n", true},
+		{"accented module alias, spaced attribute", "import importlib as \u00e9\nm = \u00e9 . import_module (n)\n", true},
+		// Identifier boundaries use Unicode letters, digits and underscore.
+		{"accented alias never called", bind + "\u00e9\nx = 1\n", false},
+		{"accented alias is only an attribute name prefix", bind + "\u00e9\nx = \u00e9\u00e9(n)\n", false},
+		{"ascii alias inside a longer accented name", bind + "im\nm = \u00e9im(n)\n", false},
+		{"ascii alias before an accented letter", bind + "im\nm = im\u00e9(n)\n", false},
+		{"ascii alias before a digit", bind + "im\nm = im2(n)\n", false},
+		{"ascii alias after an underscore", bind + "im\nm = _im(n)\n", false},
+		{"valid utf-8 elsewhere", "x = '\u00e9'  # \u00e9\ny = 1\n", false},
+	} {
+		_, dynamic, ok := scanRecovering(t, tc.name, tc.src)
+		if !ok || dynamic != tc.want {
+			t.Errorf("%s: dynamic = %v ok = %v, want dynamic %v for %q", tc.name, dynamic, ok, tc.want, tc.src)
+		}
+	}
+}
+
+func TestPythonScanInvalidUTF8KeepsImports(t *testing.T) {
+	src := "import a\n# caf\xe9\nfrom b import c\n"
+	got, dynamic, ok := scanRecovering(t, "latin-1 comment", src)
+	want := []pyImport{{Module: "a"}, {From: true, Module: "b", Names: []string{"c"}}}
+	if !ok || !dynamic || !reflect.DeepEqual(got, want) {
+		t.Errorf("scan = %+v dynamic=%v ok=%v, want %+v dynamic=true ok=true", got, dynamic, ok, want)
+	}
+}
+
 func TestPythonScanStripsLeadingBOM(t *testing.T) {
 	const bom = "\xef\xbb\xbf"
 	for _, tc := range []struct {
