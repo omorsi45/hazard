@@ -158,7 +158,7 @@ func selectedList(list []Selected, asNull bool) []selectedJSON {
 	}
 	out := make([]selectedJSON, len(list))
 	for i, s := range list {
-		out[i] = selectedJSON{TestID: s.TestID, Source: s.Source, Reason: s.Reason, P: s.P, Package: s.Package, RunnerID: s.RunnerID}
+		out[i] = selectedJSON(s) // identical fields, so the wire format cannot drift from Selected
 	}
 	return out
 }
