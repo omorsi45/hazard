@@ -402,6 +402,10 @@ func buildFiles(ctx context.Context, root string, entries []diffEntry, untracked
 			classSrc = oldSrc
 		}
 		f.Kind = Classify(f.Path, classSrc, opts.GeneratedGlobs)
+		f.OldKind = f.Kind
+		if f.Status == "R" {
+			f.OldKind = Classify(f.OldPath, oldSrc, opts.GeneratedGlobs)
+		}
 		files = append(files, f)
 	}
 	sort.SliceStable(files, func(i, j int) bool {

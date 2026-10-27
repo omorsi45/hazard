@@ -43,10 +43,11 @@ type Hunk struct {
 
 // ChangedFile is one path in a ChangeSet.
 type ChangedFile struct {
-	Path, OldPath string // OldPath is set for renames
-	Kind          FileKind
-	Status        string // "A", "M", "D" or "R"
-	Language      string // "go", "python" or ""
+	Path, OldPath string   // OldPath is set for renames
+	Kind          FileKind // classification of Path with head content (old path/content for deletes)
+	OldKind       FileKind // renames only: classification of OldPath with base content; equals Kind otherwise
+	Status        string   // "A", "M", "D" or "R"
+	Language      string   // "go", "python" or ""
 	Binary        bool
 	Hunks         []Hunk
 	Package       string // filled by the engine from the graph, empty from Extract
