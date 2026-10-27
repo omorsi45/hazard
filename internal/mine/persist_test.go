@@ -25,6 +25,13 @@ func TestMiningMigrationUpgradesExistingStoreAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Every embedded migration must be recorded after the upgrade, so the
+	// expectation follows the migration files instead of a literal count.
+	migrationFiles, err := filepath.Glob("../store/migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantVersions := len(migrationFiles)
 	if _, err := db.Exec(string(schema)); err != nil {
 		t.Fatal(err)
 	}
@@ -58,8 +65,8 @@ func TestMiningMigrationUpgradesExistingStoreAndReopens(t *testing.T) {
 		if err := s.DB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&versions); err != nil {
 			t.Fatal(err)
 		}
-		if tests != 1 || versions != 3 {
-			t.Errorf("preserved tests/migrations = %d/%d, want 1/3", tests, versions)
+		if tests != 1 || versions != wantVersions {
+			t.Errorf("preserved tests/migrations = %d/%d, want 1/%d", tests, versions, wantVersions)
 		}
 		if err := s.Close(); err != nil {
 			t.Fatal(err)
