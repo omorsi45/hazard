@@ -9,8 +9,8 @@ import (
 	"errors"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -23,22 +23,19 @@ import (
 func gitRepo(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
-	writeFiles(t, dir, files)
-	git(t, dir, "init", "-q")
-	git(t, dir, "add", "-A")
-	git(t, dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
+	if err := initRepo(dir, files); err != nil {
+		t.Fatal(err)
+	}
 	return dir
 }
 
 func git(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	out, err := runGit(dir, args...)
 	if err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
+		t.Fatal(err)
 	}
-	return strings.TrimSpace(string(out))
+	return out
 }
 
 func hexSHA(s string) string {
@@ -68,12 +65,7 @@ func goOnly() config.Config {
 
 func TestManifestBuildGo(t *testing.T) {
 	t.Parallel()
-	dir := gitRepo(t, goFixture())
-	writeFiles(t, dir, map[string]string{"ignored.go": "package ignored\n"})
-	m, err := Build(context.Background(), dir, goOnly(), Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir, m := sharedGoRepo(t)
 	if m.Schema != SchemaVersion || !m.Complete || m.CreatedAt.IsZero() {
 		t.Errorf("header = schema %d complete %v created %v", m.Schema, m.Complete, m.CreatedAt)
 	}
@@ -113,7 +105,7 @@ func TestManifestBuildGo(t *testing.T) {
 	if m.ContentDigest != hexSHA(digest.String()) {
 		t.Errorf("ContentDigest = %q", m.ContentDigest)
 	}
-	cfgJSON, _ := json.Marshal(goOnly())
+	cfgJSON, _ := json.Marshal(config.Defaults())
 	if m.ConfigDigest != hexSHA(string(cfgJSON)) {
 		t.Errorf("ConfigDigest = %q", m.ConfigDigest)
 	}
@@ -126,23 +118,44 @@ func TestManifestBuildGo(t *testing.T) {
 	if len(m.Tests) != 1 || m.Tests[0].ID != "go:example.com/m/a:TestA" || m.Tests[0].Purpose != "TestA checks A." {
 		t.Errorf("tests = %+v", m.Tests)
 	}
-	var sawList bool
+	var sawList, sawVersion bool
 	for _, c := range m.Commands {
 		if len(c.Argv) > 1 && c.Argv[0] == "go" && c.Argv[1] == "list" && c.Exit == 0 && c.Dir != "" {
 			sawList = true
 		}
+		if strings.Join(c.Argv, " ") == "go version" && c.Exit == 0 && c.Dir != "" && c.Seconds > 0 {
+			sawVersion = true
+		}
 	}
 	if !sawList {
 		t.Errorf("go list command not recorded: %+v", m.Commands)
+	}
+	if !sawVersion {
+		t.Errorf("the go version probe behind Tools[go] must be recorded in Commands: %+v", m.Commands)
 	}
 	if m.Coverage != nil {
 		t.Error("coverage was not requested")
 	}
 }
 
+func TestManifestGoOnlyRepositoryWithDefaultConfigIsComplete(t *testing.T) {
+	t.Parallel()
+	_, m := sharedGoRepo(t)
+	if !m.Complete {
+		t.Errorf("a Go-only repository must stay complete under the default configuration that enables Python: %v", m.Diagnostics)
+	}
+	if want := []string{"python: absent"}; !reflect.DeepEqual(m.Diagnostics, want) {
+		t.Errorf("diagnostics = %q, want %q", m.Diagnostics, want)
+	}
+	if _, ok := m.Tools["python"]; ok {
+		t.Errorf("no Python tool may be probed without Python sources: %v", m.Tools)
+	}
+}
+
 func TestManifestBuildDirtyTree(t *testing.T) {
 	t.Parallel()
-	dir := gitRepo(t, goFixture())
+	shared, _ := sharedGoRepo(t)
+	dir := copyRepo(t, shared)
 	writeFiles(t, dir, map[string]string{"c/c.go": "package c\n"})
 	m, err := Build(context.Background(), dir, goOnly(), Options{})
 	if err != nil {
@@ -155,7 +168,8 @@ func TestManifestBuildDirtyTree(t *testing.T) {
 
 func TestManifestSkipsDisabledAndAbsentLanguages(t *testing.T) {
 	t.Parallel()
-	dir := gitRepo(t, goFixture())
+	shared, _ := sharedGoRepo(t)
+	dir := copyRepo(t, shared)
 	cfg := config.Defaults()
 	cfg.Languages.Go.Enabled = false
 	cfg.Languages.Python.Enabled = true
@@ -173,25 +187,83 @@ func TestManifestSkipsDisabledAndAbsentLanguages(t *testing.T) {
 		}
 	}
 	if !m.Complete {
-		t.Error("a repository without Python tests is still complete")
+		t.Error("a repository without Python sources is still complete")
 	}
 	pythonOnly := gitRepo(t, map[string]string{"a.py": "x = 1\n"})
 	m, err = Build(context.Background(), pythonOnly, config.Defaults(), Options{})
 	if err != nil {
 		t.Fatalf("a repository without go.mod and without pytest tests must build: %v", err)
 	}
-	if !m.Complete || len(m.Tests) != 0 || m.Graph.Packages["py:a"] == nil || m.Files["a.py"] == "" {
-		t.Errorf("python-only repository: complete=%v tests=%v graph=%v files=%v", m.Complete, m.Tests, m.Graph.Packages, m.Files)
+	if m.Complete || len(m.Tests) != 0 || m.Graph.Packages["py:a"] == nil || m.Files["a.py"] == "" {
+		t.Errorf("python-only repository without testpaths must build but be incomplete: complete=%v tests=%v graph=%v files=%v", m.Complete, m.Tests, m.Graph.Packages, m.Files)
 	}
+}
+
+func TestManifestCompletenessPerLanguage(t *testing.T) {
+	t.Parallel()
+	const (
+		goNotAnalyzed     = "go: Go source files exist but there is no go.mod in the repository root"
+		pythonNotAnalyzed = "python: Python source files exist but none of the configured testpaths exist"
+	)
+	bothDisabled := config.Defaults()
+	bothDisabled.Languages.Go.Enabled = false
+	bothDisabled.Languages.Python.Enabled = false
+	for _, tc := range []struct {
+		name     string
+		files    map[string]string
+		cfg      config.Config
+		complete bool
+		diags    []string // each must be contained in some diagnostic
+		noDiags  []string // none may be contained in any diagnostic
+	}{
+		{"python sources without testpaths", map[string]string{"a.py": "x = 1\n"}, config.Defaults(), false,
+			[]string{pythonNotAnalyzed, "go: absent"}, []string{"python: absent", goNotAnalyzed}},
+		{"go sources without a root go.mod", map[string]string{"sub/a.go": "package a\n"}, config.Defaults(), false,
+			[]string{goNotAnalyzed, "python: absent"}, []string{"go: absent", pythonNotAnalyzed}},
+		{"go and python sources, neither analyzed", map[string]string{"sub/a.go": "package a\n", "a.py": "x = 1\n"}, config.Defaults(), false,
+			[]string{goNotAnalyzed, pythonNotAnalyzed}, []string{"go: absent", "python: absent"}},
+		{"no sources at all", map[string]string{"README.md": "# readme\n"}, config.Defaults(), true,
+			[]string{"go: absent", "python: absent"}, []string{goNotAnalyzed, pythonNotAnalyzed}},
+		{"disabled languages are not reported", map[string]string{"sub/a.go": "package a\n", "a.py": "x = 1\n"}, bothDisabled, true,
+			nil, []string{"go:", "python:"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := gitRepo(t, tc.files)
+			m, err := Build(context.Background(), dir, tc.cfg, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m.Complete != tc.complete {
+				t.Errorf("Complete = %v, want %v (diagnostics %q)", m.Complete, tc.complete, m.Diagnostics)
+			}
+			for _, want := range tc.diags {
+				if !anyContains(m.Diagnostics, want) {
+					t.Errorf("no diagnostic contains %q: %q", want, m.Diagnostics)
+				}
+			}
+			for _, unwanted := range tc.noDiags {
+				if anyContains(m.Diagnostics, unwanted) {
+					t.Errorf("a diagnostic contains %q: %q", unwanted, m.Diagnostics)
+				}
+			}
+		})
+	}
+}
+
+func anyContains(list []string, substr string) bool {
+	for _, s := range list {
+		if strings.Contains(s, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestManifestPublishLoadRoundTrip(t *testing.T) {
 	t.Parallel()
-	dir := gitRepo(t, goFixture())
-	m, err := Build(context.Background(), dir, goOnly(), Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	shared, m := sharedGoRepo(t)
+	dir := copyRepo(t, shared)
 	if err := Publish(dir, m); err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +280,7 @@ func TestManifestPublishLoadRoundTrip(t *testing.T) {
 	if err != nil || len(entries) != 1 || entries[0].Name() != "manifest.json" {
 		t.Errorf("only manifest.json may remain after Publish: %v %v", entries, err)
 	}
-	if dirty, _ := m.Stale(dir, goOnly()); dirty != "" {
+	if dirty, _ := m.Stale(dir, config.Defaults()); dirty != "" {
 		t.Errorf("publishing under .hazard must not make the index stale: %q", dirty)
 	}
 }
@@ -233,11 +305,8 @@ func TestManifestLoadValidates(t *testing.T) {
 
 func TestManifestFailedBuildKeepsPublishedManifest(t *testing.T) {
 	t.Parallel()
-	dir := gitRepo(t, goFixture())
-	first, err := Build(context.Background(), dir, goOnly(), Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	shared, first := sharedGoRepo(t)
+	dir := copyRepo(t, shared)
 	if err := Publish(dir, first); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +317,7 @@ func TestManifestFailedBuildKeepsPublishedManifest(t *testing.T) {
 	}
 	// A package error makes go list fail: discovery fails, nothing is published.
 	writeFiles(t, dir, map[string]string{"a/a.go": "package a\n\nimport \"example.com/m/missing\"\n\nfunc A() int { return missing.X }\n"})
-	if m, err := Build(context.Background(), dir, goOnly(), Options{}); err == nil || m != nil {
+	if m, err := Build(context.Background(), dir, config.Defaults(), Options{}); err == nil || m != nil {
 		t.Fatalf("a package error must fail the build: %v %v", m, err)
 	}
 	// A manifest that cannot be encoded fails Publish without touching the file.
@@ -260,7 +329,7 @@ func TestManifestFailedBuildKeepsPublishedManifest(t *testing.T) {
 	// A canceled context fails the build.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if m, err := Build(ctx, dir, goOnly(), Options{}); err == nil || m != nil {
+	if m, err := Build(ctx, dir, config.Defaults(), Options{}); err == nil || m != nil {
 		t.Fatalf("canceled build: %v %v", m, err)
 	}
 	after, err := os.ReadFile(manifestPath)
@@ -314,12 +383,9 @@ func TestManifestStale(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			dir := gitRepo(t, goFixture())
-			cfg := goOnly()
-			m, err := Build(context.Background(), dir, cfg, Options{})
-			if err != nil {
-				t.Fatal(err)
-			}
+			shared, m := sharedGoRepo(t)
+			dir := copyRepo(t, shared)
+			cfg := config.Defaults()
 			tc.mutate(t, dir, &cfg)
 			reason, err := m.Stale(dir, cfg)
 			if err != nil {

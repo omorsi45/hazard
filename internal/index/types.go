@@ -44,7 +44,7 @@ type TestCoverage struct {
 // Coverage is per-test coverage collected at one tree.
 type Coverage struct {
 	HeadSHA, ContentDigest string
-	Granularity            string                  // "go-top-level-test" | "python-test-context"
+	Granularity            string                  // "go-top-level-test", "python-test-context" or both, sorted and joined with ","
 	Tests                  map[string]TestCoverage // by test ID
 	FileDigests            map[string]string       // sha256 of each instrumented file at collection time
 }

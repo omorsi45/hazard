@@ -78,14 +78,20 @@ func Build(ctx context.Context, repoDir string, cfg config.Config, opts Options)
 	var graphs []*graph.Graph
 	var tests []Test
 	if cfg.Languages.Go.Enabled {
-		if _, statErr := os.Stat(filepath.Join(root, "go.mod")); statErr != nil {
-			m.Diagnostics = append(m.Diagnostics, "go: no go.mod in the repository root; Go scope skipped")
-		} else {
+		switch _, statErr := os.Stat(filepath.Join(root, "go.mod")); {
+		case statErr == nil:
 			goTests, goGraph, err := buildGo(ctx, root, cfg, m)
 			if err != nil {
 				return nil, err
 			}
 			graphs, tests = append(graphs, goGraph), append(tests, goTests...)
+		case hasSource(m.Files, ".go"):
+			// Go sources exist but nothing could be analyzed: the graph and the
+			// inventory are missing them, so selection must run everything.
+			m.Complete = false
+			m.Diagnostics = append(m.Diagnostics, "go: Go source files exist but there is no go.mod in the repository root; Go scope skipped")
+		default:
+			m.Diagnostics = append(m.Diagnostics, "go: absent")
 		}
 	}
 	if cfg.Languages.Python.Enabled {
@@ -120,6 +126,7 @@ func buildGo(ctx context.Context, root string, cfg config.Config, m *Manifest) (
 	if err != nil {
 		return nil, nil, err
 	}
+	m.Commands = append(m.Commands, version.Command)
 	if fields := strings.Fields(string(version.Stdout)); version.Command.Exit == 0 && len(fields) >= 3 {
 		m.Tools["go"] = fields[2]
 	}
@@ -170,7 +177,13 @@ func buildPython(ctx context.Context, root, python string, cfg config.Config, m 
 		}
 	}
 	if len(existing) == 0 {
-		m.Diagnostics = append(m.Diagnostics, fmt.Sprintf("python: none of the configured testpaths exist (%s); no Python tests collected", strings.Join(cfg.Languages.Python.Testpaths, ", ")))
+		if hasSource(m.Files, ".py") {
+			// Python sources exist but no test could be collected from them.
+			m.Complete = false
+			m.Diagnostics = append(m.Diagnostics, fmt.Sprintf("python: Python source files exist but none of the configured testpaths exist (%s); no Python tests collected", strings.Join(cfg.Languages.Python.Testpaths, ", ")))
+		} else {
+			m.Diagnostics = append(m.Diagnostics, "python: absent")
+		}
 		return nil, g, nil
 	}
 	for _, probe := range []struct {
@@ -184,6 +197,7 @@ func buildPython(ctx context.Context, root, python string, cfg config.Config, m 
 		if err != nil {
 			return nil, nil, err
 		}
+		m.Commands = append(m.Commands, res.Command)
 		if version := toolVersion(res); version != "" {
 			m.Tools[probe.key] = version
 		}
@@ -267,6 +281,17 @@ func relevantFiles(ctx context.Context, root string, cfg config.Config) (map[str
 		files[rel] = sha(data)
 	}
 	return files, []Command{res.Command}, nil
+}
+
+// hasSource reports whether files (the relevant files of the enabled
+// languages) contains a file with the given source extension.
+func hasSource(files map[string]string, ext string) bool {
+	for rel := range files {
+		if strings.HasSuffix(rel, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 func isRelevant(rel string, cfg config.Config) bool {

@@ -225,6 +225,7 @@ func collectPythonCoverage(ctx context.Context, root, python string, cfg config.
 		return res, nil
 	}
 	version, err := runCommand(ctx, root, pythonEnv, python, "-m", "coverage", "--version")
+	res.Commands = append(res.Commands, version.Command)
 	if err != nil {
 		return res, err
 	}
