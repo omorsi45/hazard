@@ -69,15 +69,7 @@ func NewRoot() *cobra.Command {
 
 	root.AddCommand(newMineCommand(mine.Mine))
 
-	labels := &cobra.Command{Use: "labels", Short: "Build and inspect regression labels"}
-	for _, item := range []struct{ name, purpose string }{
-		{"build", "Build regression labels"},
-		{"flaky", "Classify flaky results"},
-		{"stats", "Report label yield"},
-	} {
-		labels.AddCommand(leaf(item.name, item.purpose))
-	}
-	root.AddCommand(labels)
+	root.AddCommand(newLabelsCommand(newLabelsBackend()))
 
 	mutate := leaf("mutate", "Generate mutation labels")
 	mutate.Flags().String("base", "HEAD", "base revision")
