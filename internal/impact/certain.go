@@ -61,7 +61,7 @@ func addDirect(c certainSet, inv *inventory, m *index.Manifest, files []change.C
 		}
 	}
 	for _, f := range files {
-		if f.Kind != change.KindTest {
+		if f.Kind != change.KindTest && f.OldKind != change.KindTest {
 			continue
 		}
 		for _, pkg := range testFileOwners(m.Graph, f) {
@@ -104,7 +104,7 @@ func testFileOwners(g *graph.Graph, f change.ChangedFile) []string {
 // changed fixture file.
 func addFixture(c certainSet, inv *inventory, m *index.Manifest, files []change.ChangedFile) {
 	for _, f := range files {
-		if f.Kind != change.KindFixture {
+		if f.Kind != change.KindFixture && f.OldKind != change.KindFixture {
 			continue
 		}
 		for _, p := range changedPaths(f) {

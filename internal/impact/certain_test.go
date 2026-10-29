@@ -84,6 +84,20 @@ func TestDirectRule(t *testing.T) {
 		f.OldPath = "left/left_test.go"
 		return f
 	}
+	// The old side was a test file; the new name is plain source, so Kind alone
+	// does not say a test file changed.
+	renamedAwayFromTest := func() change.ChangedFile {
+		f := cf("left/helper.go", "R", change.KindSource, hunk(1, 1))
+		f.OldPath, f.OldKind = "left/left_test.go", change.KindTest
+		return f
+	}
+	addOtherLeftTest := func(in *Input) {
+		extra := goTest("m/left", "TestLeftOther")
+		extra.File = "left/other_test.go"
+		in.Index.Tests = append(in.Index.Tests, extra)
+		pkg := in.Index.Graph.Packages["m/left"]
+		pkg.TestFiles = append(pkg.TestFiles, extra.File)
+	}
 	cases := []struct {
 		name  string
 		files []change.ChangedFile
@@ -98,14 +112,8 @@ func TestDirectRule(t *testing.T) {
 		{
 			name:  "tests in the package's other test files are selected too",
 			files: []change.ChangedFile{cf("left/left_test.go", "M", change.KindTest, hunk(5, 2))},
-			edit: func(in *Input) {
-				extra := goTest("m/left", "TestLeftOther")
-				extra.File = "left/other_test.go"
-				in.Index.Tests = append(in.Index.Tests, extra)
-				pkg := in.Index.Graph.Packages["m/left"]
-				pkg.TestFiles = append(pkg.TestFiles, extra.File)
-			},
-			want: map[string]string{testID("m/left", "TestLeft"): "direct", testID("m/left", "TestLeftOther"): "direct"},
+			edit:  addOtherLeftTest,
+			want:  map[string]string{testID("m/left", "TestLeft"): "direct", testID("m/left", "TestLeftOther"): "direct"},
 		},
 		{
 			name:  "a deleted test file selects the tests it held",
@@ -116,6 +124,12 @@ func TestDirectRule(t *testing.T) {
 			name:  "a renamed test file selects through its old path",
 			files: []change.ChangedFile{renamedTest()},
 			want:  map[string]string{testID("m/left", "TestLeft"): "direct"},
+		},
+		{
+			name:  "a test file renamed to a non-test name still selects every test of its package",
+			files: []change.ChangedFile{renamedAwayFromTest()},
+			edit:  addOtherLeftTest,
+			want:  map[string]string{testID("m/left", "TestLeft"): "direct", testID("m/left", "TestLeftOther"): "direct"},
 		},
 		{
 			name:  "a changed Python test file selects the module and class tests",
@@ -193,6 +207,10 @@ func TestFixtureRule(t *testing.T) {
 		f.Status, f.OldPath = "R", "left/testdata/case.yaml"
 		return f
 	}
+	// The old side was a fixture; the new name is not classified as one.
+	renamedAwayFromFixture := func() change.ChangedFile {
+		return change.ChangedFile{Path: "left/case.txt", OldPath: "left/testdata/case.yaml", Status: "R", Kind: change.KindConfig, OldKind: change.KindFixture, Hunks: []change.Hunk{hunk(1, 1, "__file__")}}
+	}
 	cases := []struct {
 		name  string
 		files []change.ChangedFile
@@ -202,6 +220,7 @@ func TestFixtureRule(t *testing.T) {
 		{"fixture selects only its own package", []change.ChangedFile{fixture("core/testdata/x.json")}, map[string]string{testID("m/core", "TestCore"): "fixture", testID("m/core", "TestCoreAux"): "fixture"}},
 		{"fixture outside every package", []change.ChangedFile{fixture("elsewhere/data.yaml")}, map[string]string{}},
 		{"fixture moved out of a package", []change.ChangedFile{movedFixture()}, map[string]string{testID("m/left", "TestLeft"): "fixture"}},
+		{"fixture renamed to a non-fixture name", []change.ChangedFile{renamedAwayFromFixture()}, map[string]string{testID("m/left", "TestLeft"): "fixture"}},
 		{"sibling directory sharing a prefix", []change.ChangedFile{fixture("leftover/data.yaml")}, map[string]string{}},
 	}
 	for _, tc := range cases {
