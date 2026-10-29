@@ -2,13 +2,17 @@ package mutate
 
 import (
 	"archive/tar"
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // safeEntryPath validates a tar entry name and returns it as a slash-separated
@@ -96,4 +100,127 @@ func writeEntry(target string, mode os.FileMode, r io.Reader) (err error) {
 		return fmt.Errorf("mutate: write %s: %w", target, err)
 	}
 	return nil
+}
+
+// scrubbedGitEnv lists variables that redirect git to another repository,
+// work tree or index; a surrounding git hook exports them.
+var scrubbedGitEnv = map[string]bool{
+	"GIT_DIR": true, "GIT_WORK_TREE": true, "GIT_INDEX_FILE": true, "GIT_COMMON_DIR": true,
+	"GIT_OBJECT_DIRECTORY": true, "GIT_ALTERNATE_OBJECT_DIRECTORIES": true, "GIT_PREFIX": true,
+}
+
+func gitEnv() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if !scrubbedGitEnv[strings.ToUpper(name)] {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "GIT_OPTIONAL_LOCKS=0")
+}
+
+// stderrTail keeps the last part of a command's stderr for error messages.
+func stderrTail(b []byte) string {
+	const keep = 600
+	s := strings.TrimSpace(string(b))
+	if len(s) > keep {
+		s = "..." + s[len(s)-keep:]
+	}
+	return s
+}
+
+// gitOutput runs git in dir and returns its stdout.
+func gitOutput(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.quotePath=false"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = gitEnv()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, stderrTail(stderr.Bytes()))
+	}
+	return stdout.Bytes(), nil
+}
+
+// resolveBase returns the commit SHA that base names in repoDir.
+func resolveBase(ctx context.Context, repoDir, base string) (string, error) {
+	if base == "" || strings.HasPrefix(base, "-") {
+		return "", fmt.Errorf("mutate: invalid base revision %q", base)
+	}
+	out, err := gitOutput(ctx, repoDir, "rev-parse", "--verify", "--end-of-options", base+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("mutate: base %q is not a commit of %s: %w", base, repoDir, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// listTracked returns the files tracked at the commit sha, in git's order.
+func listTracked(ctx context.Context, repoDir, sha string) ([]string, error) {
+	out, err := gitOutput(ctx, repoDir, "ls-tree", "-r", "--name-only", "-z", sha)
+	if err != nil {
+		return nil, fmt.Errorf("mutate: list the files at %s: %w", sha, err)
+	}
+	var files []string
+	for _, name := range strings.Split(string(out), "\x00") {
+		if name != "" {
+			files = append(files, name)
+		}
+	}
+	return files, nil
+}
+
+// extractArchive writes the tree of commit sha into dst using git archive.
+func extractArchive(ctx context.Context, repoDir, sha, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("mutate: create %s: %w", dst, err)
+	}
+	cmd := exec.CommandContext(ctx, "git", "archive", "--format=tar", sha)
+	cmd.Dir = repoDir
+	cmd.Env = gitEnv()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("mutate: git archive: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("mutate: git archive: %w", err)
+	}
+	extractErr := extractTar(stdout, dst)
+	if extractErr != nil {
+		// Stop git so Wait cannot block on a full pipe.
+		if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+			extractErr = errors.Join(extractErr, killErr)
+		}
+	} else if _, drainErr := io.Copy(io.Discard, stdout); drainErr != nil {
+		extractErr = fmt.Errorf("mutate: read the base archive: %w", drainErr)
+	}
+	waitErr := cmd.Wait()
+	switch {
+	case extractErr != nil:
+		return extractErr
+	case waitErr != nil:
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("mutate: git archive %s: %w: %s", sha, waitErr, stderrTail(stderr.Bytes()))
+	}
+	return nil
+}
+
+// removeAllRetry removes dir, retrying briefly: on Windows a just-exited test
+// binary can hold a file open for a moment.
+func removeAllRetry(dir string) error {
+	var err error
+	for attempt := 0; attempt < 8; attempt++ {
+		if err = os.RemoveAll(dir); err == nil {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("mutate: remove %s: %w", dir, err)
 }
