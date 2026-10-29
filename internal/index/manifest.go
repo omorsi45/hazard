@@ -367,47 +367,13 @@ func Load(repoDir string) (*Manifest, error) {
 
 // Stale returns a non-empty reason when the manifest no longer describes the
 // repository: the config digest differs, a recorded file changed or vanished,
-// or a new relevant file appeared. An error means staleness could not be
-// determined and must be treated as stale.
+// or a new relevant file appeared. It is StaleFor with an empty change set over
+// the working tree. An error means staleness could not be determined and must
+// be treated as stale.
 func (m *Manifest) Stale(repoDir string, cfg config.Config) (reason string, err error) {
-	digest, err := configDigest(cfg)
-	if err != nil {
-		return "", err
-	}
-	if digest != m.ConfigDigest {
-		return "config changed", nil
-	}
 	root, err := filepath.Abs(repoDir)
 	if err != nil {
 		return "", err
 	}
-	current, _, err := relevantFiles(context.Background(), root, cfg)
-	if err != nil {
-		return "", err
-	}
-	recorded := make([]string, 0, len(m.Files))
-	for p := range m.Files {
-		recorded = append(recorded, p)
-	}
-	sort.Strings(recorded)
-	for _, p := range recorded {
-		hash, ok := current[p]
-		if !ok {
-			return "file removed: " + p, nil
-		}
-		if hash != m.Files[p] {
-			return "file changed: " + p, nil
-		}
-	}
-	added := make([]string, 0)
-	for p := range current {
-		if _, ok := m.Files[p]; !ok {
-			added = append(added, p)
-		}
-	}
-	sort.Strings(added)
-	if len(added) > 0 {
-		return "new file: " + added[0], nil
-	}
-	return "", nil
+	return m.StaleFor(cfg, nil, workTreeHead{root: root})
 }

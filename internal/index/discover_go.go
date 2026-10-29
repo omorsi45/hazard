@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -44,9 +45,25 @@ func discoverGo(repoDir string, g *graph.Graph) ([]Test, error) {
 	return tests, nil
 }
 
+// discoverGoFile reads one test file of the working tree and discovers its
+// tests; a file that cannot be read fails discovery like one that cannot be
+// parsed.
 func discoverGoFile(repoDir, importPath, rel string) ([]Test, error) {
+	src, err := os.ReadFile(filepath.Join(repoDir, filepath.FromSlash(rel)))
+	if err != nil {
+		return nil, fmt.Errorf("discover Go tests in %s: %w", rel, err)
+	}
+	return DiscoverGoTests(importPath, rel, src)
+}
+
+// DiscoverGoTests statically discovers the Test and Fuzz functions in the
+// content of one Go test file, which belongs to the package importPath and is
+// reported at the repo-relative path rel. IDs, Purpose and Asserts follow the
+// same rules as in Build. Unparsable content is an error, never an empty
+// inventory.
+func DiscoverGoTests(importPath, rel string, src []byte) ([]Test, error) {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filepath.Join(repoDir, filepath.FromSlash(rel)), nil, parser.ParseComments)
+	file, err := parser.ParseFile(fset, rel, src, parser.ParseComments)
 	if err != nil {
 		return nil, fmt.Errorf("discover Go tests in %s: %w", rel, err)
 	}
