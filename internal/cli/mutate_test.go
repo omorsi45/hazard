@@ -30,7 +30,9 @@ func (r *mutateRecorder) run(_ context.Context, opts mutate.Options) (mutate.Sum
 	r.calls++
 	r.opts = opts
 	if opts.Log != nil {
-		fmt.Fprintln(opts.Log, "progress line")
+		if _, err := fmt.Fprintln(opts.Log, "progress line"); err != nil {
+			return mutate.Summary{}, err
+		}
 	}
 	return r.sum, r.err
 }

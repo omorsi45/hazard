@@ -340,7 +340,8 @@ func newLogger(w io.Writer) func(format string, args ...any) {
 	return func(format string, args ...any) {
 		mu.Lock()
 		defer mu.Unlock()
-		fmt.Fprintf(w, format+"\n", args...)
+		// Progress output is best effort: a failing log writer must not fail the run.
+		_, _ = fmt.Fprintf(w, format+"\n", args...)
 	}
 }
 
