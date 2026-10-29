@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,10 +18,11 @@ import (
 type indexBuildFunc func(ctx context.Context, repoDir string, cfg config.Config, opts index.Options) (*index.Manifest, error)
 type indexPublishFunc func(repoDir string, m *index.Manifest) error
 
-const indexLong = `Build the test index in the current directory: the Go package and Python module
-graph, the test inventory and, with --coverage, per-test coverage. The result is
-published atomically to .hazard/index/manifest.json; a failed or canceled build
-never replaces the previous index.
+const indexLong = `Build the test index of the current git repository, always at its top level as
+select does: the Go package and Python module graph, the test inventory and,
+with --coverage, per-test coverage. The result is published atomically to
+.hazard/index/manifest.json; a failed or canceled build never replaces the
+previous index.
 
 Side effects:
   - Test collection can execute test package initialization code (go list reads
@@ -59,15 +61,15 @@ func newIndexCommand(build indexBuildFunc, publish indexPublishFunc) *cobra.Comm
 		},
 	}
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
-		cfg, err := config.Load(configPath)
-		if err != nil {
-			return usageError{err}
-		}
-		repoDir, err := os.Getwd()
+		ctx := cmd.Context()
+		repoDir, err := repoRoot(ctx)
 		if err != nil {
 			return err
 		}
-		ctx := cmd.Context()
+		cfg, err := loadIndexConfig(repoDir, configPath)
+		if err != nil {
+			return usageError{err}
+		}
 		m, err := build(ctx, repoDir, cfg, index.Options{Coverage: coverage, Python: python})
 		if err != nil {
 			return err
@@ -89,6 +91,30 @@ func newIndexCommand(build indexBuildFunc, publish indexPublishFunc) *cobra.Comm
 	f.StringVar(&configPath, "config", "", "config path (default: hazard.yml, then .hazard/hazard.yml)")
 	f.StringVar(&python, "python", "", "Python interpreter for pytest and coverage.py (default: python on PATH)")
 	return cmd
+}
+
+// loadIndexConfig loads the configuration the engine will use for repoDir: the
+// explicit path, else hazard.yml, else .hazard/hazard.yml at the repository
+// root, else the defaults. An explicit relative path is relative to the
+// working directory, as for select.
+func loadIndexConfig(repoDir, path string) (config.Config, error) {
+	if path == "" {
+		for _, rel := range []string{"hazard.yml", filepath.Join(".hazard", "hazard.yml")} {
+			candidate := filepath.Join(repoDir, rel)
+			_, err := os.Stat(candidate)
+			if err == nil {
+				path = candidate
+				break
+			}
+			if !errors.Is(err, fs.ErrNotExist) {
+				return config.Config{}, err
+			}
+		}
+		if path == "" {
+			return config.Defaults(), nil
+		}
+	}
+	return config.Load(path)
 }
 
 func summarizeIndex(repoDir string, m *index.Manifest, coverage bool) indexSummary {

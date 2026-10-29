@@ -73,6 +73,7 @@ func TestIndexHelpStatesSideEffects(t *testing.T) {
 }
 
 func TestIndexSummaryTextAndPublish(t *testing.T) {
+	top := chdirRepo(t)
 	var gotOpts index.Options
 	var gotCfg config.Config
 	var gotDir string
@@ -95,8 +96,8 @@ func TestIndexSummaryTextAndPublish(t *testing.T) {
 	if !gotOpts.Coverage || gotOpts.Python != "py3" || gotCfg.Version != 1 {
 		t.Errorf("opts=%+v cfg.Version=%d", gotOpts, gotCfg.Version)
 	}
-	if cwd, _ := os.Getwd(); !strings.EqualFold(filepath.Clean(gotDir), filepath.Clean(cwd)) {
-		t.Errorf("must build in the current directory: %q vs %q", gotDir, cwd)
+	if !sameDir(t, gotDir, top) {
+		t.Errorf("must build in the repository root: %q vs %q", gotDir, top)
 	}
 	if published == nil || len(published.Tests) != 3 {
 		t.Fatalf("manifest not published: %+v", published)
@@ -181,6 +182,58 @@ func TestIndexFailuresDoNotPublish(t *testing.T) {
 		func(string, *index.Manifest) error { return errors.New("disk full") })
 	if code != 70 || !strings.Contains(errOut, "disk full") {
 		t.Errorf("publish failure: code=%d err=%q", code, errOut)
+	}
+}
+
+// TestIndexRunsAtTheGitTopLevel runs index from a subdirectory: it must build
+// and publish at the repository root, where select looks for the index, and
+// read the default configuration there, not from the subdirectory.
+func TestIndexRunsAtTheGitTopLevel(t *testing.T) {
+	top := chdirRepo(t)
+	if err := os.WriteFile(filepath.Join(top, "hazard.yml"), []byte(indexGoOnlyConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(top, "pkg", "deep")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(sub)
+	var builtIn, publishedIn string
+	var gotCfg config.Config
+	build := func(_ context.Context, dir string, cfg config.Config, _ index.Options) (*index.Manifest, error) {
+		builtIn, gotCfg = dir, cfg
+		return fakeManifest(), nil
+	}
+	publish := func(dir string, _ *index.Manifest) error {
+		publishedIn = dir
+		return nil
+	}
+
+	code, out, errOut := runIndex(context.Background(), build, publish, "--json")
+
+	if code != 0 || errOut != "" {
+		t.Fatalf("code=%d out=%q err=%q", code, out, errOut)
+	}
+	if builtIn == "" || !sameDir(t, builtIn, top) {
+		t.Errorf("built in %q, want the git top level %q", builtIn, top)
+	}
+	if publishedIn == "" || !sameDir(t, publishedIn, top) {
+		t.Errorf("published in %q, want the git top level %q", publishedIn, top)
+	}
+	if gotCfg.Languages.Python.Enabled {
+		t.Error("the default configuration must be read from the top level (hazard.yml disables Python), not from the subdirectory")
+	}
+}
+
+func TestIndexOutsideAGitRepositoryIsAUsageError(t *testing.T) {
+	t.Chdir(t.TempDir())
+	build := func(context.Context, string, config.Config, index.Options) (*index.Manifest, error) {
+		t.Error("build must not run outside a git repository")
+		return nil, errors.New("unreachable")
+	}
+	code, _, errOut := runIndex(context.Background(), build, nil)
+	if code != 2 || !strings.Contains(errOut, "not inside a git repository") {
+		t.Errorf("code=%d err=%q, want exit 2 naming the missing repository", code, errOut)
 	}
 }
 
