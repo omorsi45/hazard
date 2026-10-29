@@ -1,0 +1,10 @@
+[project]
+name = "hazard-research"
+version = "0.0.0"
+description = "Independent reference implementation used to cross-check the Go statistics."
+requires-python = ">=3.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-p no:cacheprovider"
