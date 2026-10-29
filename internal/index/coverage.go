@@ -40,7 +40,11 @@ func addCoverage(ctx context.Context, root, python string, cfg config.Config, m 
 }
 
 // mergeCoverage combines per-language coverage into the manifest's single
-// Coverage. It returns nil when no language produced coverage.
+// Coverage. It returns nil when no language produced coverage. Each language
+// keeps its own granularity, so the merged Granularity lists the contract
+// values of the languages that contributed, sorted and joined with ",":
+// "go-top-level-test", "python-test-context" or
+// "go-top-level-test,python-test-context".
 func mergeCoverage(m *Manifest, parts []*Coverage) *Coverage {
 	if len(parts) == 0 {
 		return nil
@@ -62,6 +66,6 @@ func mergeCoverage(m *Manifest, parts []*Coverage) *Coverage {
 		}
 	}
 	sort.Strings(granularities)
-	merged.Granularity = strings.Join(granularities, "+")
+	merged.Granularity = strings.Join(granularities, ",")
 	return merged
 }

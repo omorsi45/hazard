@@ -1,7 +1,9 @@
 package index
 
 import (
+	"context"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -175,6 +177,66 @@ func TestDiscoverGo(t *testing.T) {
 	}
 	if len(long) == 2 && long[1] != `name == "a" || name == "b" || name == "c"` {
 		t.Errorf("multi-line condition not collapsed: %q", long[1])
+	}
+}
+
+func TestDiscoverGoTestsMatchesBuild(t *testing.T) {
+	t.Parallel()
+	files := map[string]string{
+		"go.mod":           goFixtureMod,
+		"p/p.go":           "package p\n",
+		"p/p_test.go":      discoverMain,
+		"p/limits_test.go": discoverLimits,
+		"p/x_test.go":      discoverExternal,
+	}
+	dir := gitRepo(t, files)
+	m, err := Build(context.Background(), dir, goOnly(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []Test
+	for _, rel := range []string{"p/limits_test.go", "p/p_test.go", "p/x_test.go"} {
+		tests, err := DiscoverGoTests("example.com/m/p", rel, []byte(files[rel]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, tests...)
+	}
+	sort.Slice(got, func(i, j int) bool { return got[i].ID < got[j].ID })
+	if len(got) != 9 {
+		t.Fatalf("discovered %d tests, want 9: %+v", len(got), got)
+	}
+	if !reflect.DeepEqual(got, m.Tests) {
+		t.Errorf("DiscoverGoTests differs from Build:\n got %+v\nwant %+v", got, m.Tests)
+	}
+}
+
+func TestDiscoverGoTestsReadsOnlyTheGivenContent(t *testing.T) {
+	t.Parallel()
+	src := []byte("package p\n\nimport \"testing\"\n\n// TestHead checks the head.\nfunc TestHead(t *testing.T) {\n\tif 1 != 1 {\n\t\tt.Fatal(\"x\")\n\t}\n}\n")
+	got, err := DiscoverGoTests("example.com/m/p", "no/such/dir/head_test.go", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Test{{
+		ID: "go:example.com/m/p:TestHead", Language: "go", Package: "example.com/m/p", Name: "TestHead",
+		File: "no/such/dir/head_test.go", RunnerID: "TestHead", Line: 6, Purpose: "TestHead checks the head.", Asserts: []string{"1 != 1"},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("DiscoverGoTests = %+v, want %+v", got, want)
+	}
+}
+
+func TestDiscoverGoTestsRejectsUnparsableContent(t *testing.T) {
+	t.Parallel()
+	for name, src := range map[string]string{
+		"syntax error": "package p\n\nfunc TestBroken( {\n",
+		"empty":        "",
+	} {
+		tests, err := DiscoverGoTests("example.com/m/p", "p/p_test.go", []byte(src))
+		if err == nil || tests != nil || !strings.Contains(err.Error(), "p/p_test.go") {
+			t.Errorf("%s: DiscoverGoTests = %v, %v; want an error naming the file and no tests", name, tests, err)
+		}
 	}
 }
 

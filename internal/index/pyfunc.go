@@ -1,6 +1,7 @@
 package index
 
 import (
+	"bytes"
 	"regexp"
 	"strings"
 )
@@ -9,6 +10,10 @@ const (
 	maxAssertTargets = 5
 	maxTargetRunes   = 80
 )
+
+// utf8BOM is the byte order mark editors on Windows prepend to UTF-8 files. It
+// is not part of the Python source, so lexPython drops one leading mark.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
 // pyStmt is one logical Python statement.
 type pyStmt struct {
@@ -33,6 +38,7 @@ var pyStringPrefix = regexp.MustCompile(`^[rRuUbBfF]{0,2}$`)
 // joined while brackets are open or after a backslash, comments are dropped
 // and string literals are masked in Mask while kept in Raw.
 func lexPython(src []byte) []pyStmt {
+	src = bytes.TrimPrefix(src, utf8BOM)
 	var stmts []pyStmt
 	var raw, mask []byte
 	var lits [][3]int // quote start, end, quote length within raw

@@ -77,6 +77,15 @@ def test_header(
     pass
 `
 
+func TestLexPythonStripsLeadingBOM(t *testing.T) {
+	src := "\xef\xbb\xbfdef test_first():\n    \"\"\"Checks the first line.\"\"\"\n    assert 1 == 1\n"
+	got, found := findPyFunc(lexPython([]byte(src)), nil, "test_first")
+	want := pyFunc{Line: 1, Purpose: "Checks the first line.", Asserts: []string{"1 == 1"}}
+	if !found || !reflect.DeepEqual(got, want) {
+		t.Fatalf("a function on line 1 after a byte order mark: findPyFunc = %+v, %v; want %+v", got, found, want)
+	}
+}
+
 func TestDiscoverPythonFunctionScan(t *testing.T) {
 	stmts := lexPython([]byte(pyFuncSource))
 	long := `name == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`

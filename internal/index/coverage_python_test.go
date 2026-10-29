@@ -246,6 +246,15 @@ func TestCoveragePythonContextsFromCoveragePy(t *testing.T) {
 	if !sawCoverage {
 		t.Errorf("coverage run not recorded: %+v", m.Commands)
 	}
+	for _, probe := range []string{python + " --version", python + " -m pytest --version", python + " -m coverage --version"} {
+		var recorded bool
+		for _, cmd := range m.Commands {
+			recorded = recorded || (strings.Join(cmd.Argv, " ") == probe && cmd.Exit == 0 && cmd.Dir != "" && cmd.Seconds > 0)
+		}
+		if !recorded {
+			t.Errorf("the version probe %q behind Tools must be recorded in Commands: %+v", probe, m.Commands)
+		}
+	}
 }
 
 func TestCoveragePythonFailingSuitePublishesWithoutCoverage(t *testing.T) {
