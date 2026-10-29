@@ -111,7 +111,7 @@ func Extract(ctx context.Context, repoDir string, opts Options) (cs *ChangeSet, 
 		droppedState = droppedState || droppedUntracked
 	}
 	// A work tree whose only differences are Hazard's own files is clean.
-	dirty := workTree && st.dirty && !(droppedState && len(entries) == 0 && len(st.untracked) == 0)
+	dirty := workTree && st.dirty && (!droppedState || len(entries) > 0 || len(st.untracked) > 0)
 
 	files, err := buildFiles(ctx, root, entries, st.untracked, workTree, opts)
 	if err != nil {
