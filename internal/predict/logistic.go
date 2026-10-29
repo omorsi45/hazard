@@ -38,15 +38,15 @@ func DefaultLogisticOptions() LogisticOptions {
 func (o LogisticOptions) validate() error {
 	switch {
 	case !isFinite(o.L2) || o.L2 < 0:
-		return fmt.Errorf("L2 must be finite and not negative, got %v", o.L2)
+		return fmt.Errorf("option L2 must be finite and not negative, got %v", o.L2)
 	case !isFinite(o.CIWeight) || o.CIWeight <= 0:
-		return fmt.Errorf("CIWeight must be finite and positive, got %v", o.CIWeight)
+		return fmt.Errorf("option CIWeight must be finite and positive, got %v", o.CIWeight)
 	case o.MaxIter <= 0:
-		return fmt.Errorf("MaxIter must be positive, got %d", o.MaxIter)
+		return fmt.Errorf("option MaxIter must be positive, got %d", o.MaxIter)
 	case !isFinite(o.Tol) || o.Tol <= 0:
-		return fmt.Errorf("Tol must be finite and positive, got %v", o.Tol)
+		return fmt.Errorf("option Tol must be finite and positive, got %v", o.Tol)
 	case !isFinite(o.LearningRate) || o.LearningRate <= 0:
-		return fmt.Errorf("LearningRate must be finite and positive, got %v", o.LearningRate)
+		return fmt.Errorf("option LearningRate must be finite and positive, got %v", o.LearningRate)
 	}
 	return nil
 }
