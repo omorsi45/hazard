@@ -14,7 +14,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"time"
 
 	"github.com/omorsi45/hazard/internal/change"
@@ -62,7 +61,7 @@ type Decision struct {
 	Lambda               float64
 	Tests                []Selected // sorted by TestID; empty when FullSuite
 	Hypothetical         []Selected // what narrowing would select under the active policy, even when FullSuite; nil when L1 itself demands the full suite
-	AllTests             []string   // inventory of a fresh index; nil when no usable index was loaded
+	AllTests             []string   // inventory of a usable index plus the Go tests that changed test files define at head; nil when no usable index was loaded
 	Change               *change.ChangeSet
 	L1                   *impact.Result
 	Warnings             []string
@@ -158,8 +157,7 @@ func applyShadow(d *Decision) {
 // pipeline runs configuration, extraction, index, L1 and the controller
 // placeholder. It returns an error only for an invalid invocation or a
 // canceled context.
-func pipeline(ctx context.Context, opts Options) (Decision, error) {
-	var d Decision
+func pipeline(ctx context.Context, opts Options) (d Decision, err error) {
 	cfg, err := loadConfig(opts)
 	if err != nil {
 		return d, err
@@ -196,7 +194,14 @@ func pipeline(ctx context.Context, opts Options) (Decision, error) {
 		d.full(reasonIndexCorrupt, err.Error())
 		return d, nil
 	}
-	stale, err := m.Stale(opts.RepoDir, cfg)
+
+	head := newTreeHead(ctx, opts.RepoDir, opts.Head == "", cs.HeadSHA)
+	defer func() {
+		if cerr := head.Close(); cerr != nil {
+			d.Warnings = append(d.Warnings, "head reader: "+cerr.Error())
+		}
+	}()
+	stale, err := staleFor(m, cfg, changedPaths(cs), head)
 	switch {
 	case ctx.Err() != nil:
 		return d, ctx.Err()
@@ -207,13 +212,17 @@ func pipeline(ctx context.Context, opts Options) (Decision, error) {
 		d.full(reasonIndexStale, "index is stale: "+stale)
 		return d, nil
 	}
-	d.AllTests = make([]string, len(m.Tests))
-	for i, t := range m.Tests {
-		d.AllTests[i] = t.ID
-	}
-	sort.Strings(d.AllTests)
+	d.AllTests = testIDs(m)
 
 	mapPackages(cs, m)
+	mi, reason, detail := withHeadTests(m, cs, head)
+	if reason != "" {
+		d.full(reason, detail)
+		return d, nil
+	}
+	if mi != m {
+		d.AllTests = testIDs(mi)
+	}
 	age := -1
 	if m.Coverage != nil {
 		if age, err = coverageAge(ctx, opts.RepoDir, m.Coverage.HeadSHA, cs.BaseSHA); err != nil {
@@ -250,7 +259,7 @@ func pipeline(ctx context.Context, opts Options) (Decision, error) {
 	}
 	res, err := impact.L1(impact.Input{
 		Change:        cs,
-		Index:         m,
+		Index:         mi,
 		History:       impact.NoHistory{},
 		Impact:        cfg.Impact,
 		Mode:          mode,
@@ -271,7 +280,7 @@ func pipeline(ctx context.Context, opts Options) (Decision, error) {
 		d.full(res.FullReason)
 		return d, nil
 	}
-	d.Hypothetical = hypothetical(res, m, always)
+	d.Hypothetical = hypothetical(res, mi, always)
 
 	selected := d.Hypothetical
 	controller(&d, controllerLockPath(opts))
@@ -279,6 +288,23 @@ func pipeline(ctx context.Context, opts Options) (Decision, error) {
 		d.Tests = selected
 	}
 	return d, nil
+}
+
+// staleFor decides whether the index describes the repository at head for a
+// change set (D055). It is a variable only so a test can make the check fail.
+var staleFor = (*index.Manifest).StaleFor
+
+// changedPaths is the Path and OldPath of every changed file: the files that
+// may differ from the index.
+func changedPaths(cs *change.ChangeSet) map[string]bool {
+	set := make(map[string]bool, len(cs.Files))
+	for _, f := range cs.Files {
+		set[f.Path] = true
+		if f.OldPath != "" {
+			set[f.OldPath] = true
+		}
+	}
+	return set
 }
 
 // loadConfig reads opts.ConfigPath, else RepoDir/hazard.yml, else

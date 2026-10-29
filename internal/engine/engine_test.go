@@ -304,25 +304,6 @@ func TestSelectFullSuiteTriggerForcesFullSuite(t *testing.T) {
 	}
 }
 
-func TestSelectStaleIndexFullSuite(t *testing.T) {
-	t.Parallel()
-	f := newFixture(t, nil)
-	f.indexNow(t, false)
-	f.write(t, map[string]string{"core/core.go": coreEdited})
-
-	d := selectOK(t, Options{RepoDir: f.dir})
-
-	if !d.FullSuite || d.AbstainReason != "index_stale" {
-		t.Fatalf("FullSuite %v reason %q, want index_stale", d.FullSuite, d.AbstainReason)
-	}
-	if len(d.Warnings) == 0 || !strings.Contains(strings.Join(d.Warnings, "\n"), "core/core.go") {
-		t.Errorf("Warnings = %v, want the stale reason naming core/core.go", d.Warnings)
-	}
-	if d.L1 != nil || d.Hypothetical != nil || len(d.Tests) != 0 || d.AllTests != nil {
-		t.Errorf("a stale index must not drive selection: L1 %v hypothetical %v tests %v all %v", d.L1, d.Hypothetical, d.Tests, d.AllTests)
-	}
-}
-
 func TestSelectMissingAndCorruptIndex(t *testing.T) {
 	t.Parallel()
 	t.Run("no index", func(t *testing.T) {

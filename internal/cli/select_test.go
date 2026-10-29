@@ -610,16 +610,40 @@ func TestSelectEndToEnd(t *testing.T) {
 			t.Errorf("JSON error envelope: code=%d out=%q err=%q (%v)", code, out, errOut, err)
 		}
 	})
-	t.Run("a stale index runs the full suite", func(t *testing.T) {
+	t.Run("an edit inside the change set after indexing keeps the index", func(t *testing.T) {
 		path := filepath.Join(dir, "left", "left.go")
 		orig, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = os.WriteFile(path, orig, 0o644) })
+		t.Cleanup(func() {
+			if err := os.WriteFile(path, orig, 0o644); err != nil {
+				t.Error(err)
+			}
+		})
 		if err := os.WriteFile(path, append(orig, []byte("\n// edited after indexing\n")...), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		code, out, errOut := invoke(ctx, "select")
+		if code != 0 || out != wantText || errOut != "" {
+			t.Errorf("code=%d out=%q err=%q, want out %q", code, out, errOut, wantText)
+		}
+	})
+	t.Run("a stale index runs the full suite", func(t *testing.T) {
+		// left.go is edited and committed after indexing, so it is no longer in
+		// the change set (HEAD against the work tree, which now holds only core)
+		// and the index no longer describes it. This leaves a commit behind: it
+		// is the last sub-test.
+		path := filepath.Join(dir, "left", "left.go")
+		orig, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(orig, []byte("\n// committed after indexing\n")...), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, dir, "add", "left/left.go")
+		gitTest(t, dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "edit left")
 		code, out, errOut := invoke(ctx, "select")
 		if code != 0 || out != "full suite: index_stale\n" || !strings.Contains(errOut, "left/left.go") {
 			t.Errorf("code=%d out=%q err=%q", code, out, errOut)
