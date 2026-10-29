@@ -47,15 +47,15 @@ type Candidate struct {
 // Input is everything Decide needs. It carries no behavior: the caller
 // gathers it from the lock, the deterministic layer and the predictor.
 type Input struct {
-	LockReason       string   // "" when a verified lock is in force; otherwise no_lock|lock_corrupt|lock_error|model_drift|rubric_mismatch|feature_mismatch|policy_mismatch
-	Lambda           float64  // from the verified lock
-	FullReason       string   // non-empty when L1 or an adapter already demands the full suite
-	TriggersFull     []string // full-suite triggers the change matched
-	Certain          []string // CERTAIN test IDs (direct, coverage, graph, fixture), any order
-	AlwaysRun        []string // quarantined/unstable test IDs, any order
-	Candidates       []Candidate
-	RawCandidates    int // L1 residual count before the cap
-	Truncated        int // RawCandidates - len(Candidates)
+	LockReason       string      // "" when a verified lock is in force; otherwise no_lock|lock_corrupt|lock_error|model_drift|rubric_mismatch|feature_mismatch|policy_mismatch
+	Lambda           float64     // from the verified lock
+	FullReason       string      // non-empty when L1 or an adapter already demands the full suite
+	TriggersFull     []string    // full-suite triggers the change matched
+	Certain          []string    // CERTAIN test IDs (direct, coverage, graph, fixture), any order
+	AlwaysRun        []string    // quarantined/unstable test IDs, any order
+	Candidates       []Candidate // every residual candidate, any order, IDs unique
+	RawCandidates    int         // L1 residual count before the cap
+	Truncated        int         // RawCandidates - len(Candidates)
 	CoverageStale    bool
 	CoverageRequired bool
 	ChangedPackages  int               // packages touched by the change
@@ -299,6 +299,8 @@ func mergeCandidates(cands []Candidate) map[string]scored {
 	return merged
 }
 
+// sortedMembers returns the members of sel ordered by test ID, which makes the
+// decision independent of map iteration and of input order.
 func sortedMembers(sel map[string]Member) []Member {
 	members := make([]Member, 0, len(sel))
 	for _, m := range sel {
