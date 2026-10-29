@@ -1,0 +1,16 @@
+{
+  "id": "gen-dec-fixture-0005",
+  "model": "typesafe/jev-1.13-20260917",
+  "provider": "TypeSafe",
+  "answers": {
+    "tier": {
+      "type": "choice",
+      "choice": "module",
+      "confidence": 0.7,
+      "probabilities": { "targeted": 0.1, "module": 0.7, "suite": 0.2 }
+    },
+    "t_001": { "type": "noul", "noul": 0.93 },
+    "t_002": { "type": "noul", "noul": 0.01 }
+  },
+  "usage": { "input_tokens": 9600, "output_tokens": 70, "cost": 0.0004 }
+}
