@@ -40,7 +40,7 @@ func sealLogistic(t *testing.T, a LogisticArtifact) LogisticArtifact {
 	return out
 }
 
-func probsOf(ps []LocalProb) string {
+func localProbsString(ps []LocalProb) string {
 	parts := make([]string, len(ps))
 	for i, p := range ps {
 		parts[i] = fmt.Sprintf("%s=%v", p.TestID, p.P)
@@ -77,7 +77,7 @@ func TestStaticScoreMapsRankThroughTheIsotonicSteps(t *testing.T) {
 		{"t1", 0.05}, {"t2", 0.05}, {"t3", 0.05}, {"t4", 0.25}, {"t5", 0.25}, {"t6", 0.75}, {"t7", 0.75},
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Score = %s\nwant    %s", probsOf(got), probsOf(want))
+		t.Errorf("Score = %s\nwant    %s", localProbsString(got), localProbsString(want))
 	}
 	if cands[0].TestID != "t7" || cands[1].TestID != "t1" {
 		t.Error("Score reordered its input")
@@ -97,10 +97,10 @@ func TestStaticScoreRefusesAnUnknownRank(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			got, err := s.Score([]impact.Candidate{{TestID: "ok", Rank: 1}, {TestID: "bad", Rank: rank}})
 			if err == nil {
-				t.Fatalf("Score = %s with no error", probsOf(got))
+				t.Fatalf("Score = %s with no error", localProbsString(got))
 			}
 			if got != nil {
-				t.Errorf("Score returned %s alongside an error", probsOf(got))
+				t.Errorf("Score returned %s alongside an error", localProbsString(got))
 			}
 			if !strings.Contains(err.Error(), "bad") {
 				t.Errorf("error %q does not name the test", err)
@@ -123,7 +123,7 @@ func TestStaticScoreRefusesAnUnverifiedArtifact(t *testing.T) {
 			s := NewStatic(a)
 			got, err := s.Score([]impact.Candidate{{TestID: "t", Rank: 1}})
 			if err == nil {
-				t.Fatalf("Score = %s with no error", probsOf(got))
+				t.Fatalf("Score = %s with no error", localProbsString(got))
 			}
 			if !strings.Contains(err.Error(), "digest") {
 				t.Errorf("error %q does not name the digest", err)
@@ -203,7 +203,7 @@ func TestLogisticPredictorScoreKnownVectors(t *testing.T) {
 	}
 	want := []LocalProb{{"a", sigmoidRef(195.5)}, {"b", sigmoidRef(3.5)}, {"c", sigmoidRef(-2.5)}}
 	if len(got) != len(want) {
-		t.Fatalf("Score = %s, want %s", probsOf(got), probsOf(want))
+		t.Fatalf("Score = %s, want %s", localProbsString(got), localProbsString(want))
 	}
 	for i := range want {
 		if got[i].TestID != want[i].TestID || !approx(got[i].P, want[i].P, 1e-12) {
@@ -295,10 +295,10 @@ func TestLogisticPredictorScoreRefusesUnknown(t *testing.T) {
 			l := NewLogistic(sealLogistic(t, tc.a))
 			got, err := l.Score([]impact.Candidate{tc.c, {TestID: "ok", Features: impact.Features{Hops: 1, Reachable: true}}})
 			if err == nil {
-				t.Fatalf("Score = %s with no error", probsOf(got))
+				t.Fatalf("Score = %s with no error", localProbsString(got))
 			}
 			if got != nil {
-				t.Errorf("Score returned %s alongside an error", probsOf(got))
+				t.Errorf("Score returned %s alongside an error", localProbsString(got))
 			}
 			if !strings.Contains(err.Error(), "bad") {
 				t.Errorf("error %q does not name the test", err)
@@ -320,7 +320,7 @@ func TestLogisticPredictorScoreRefusesAnUnverifiedArtifact(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			got, err := NewLogistic(a).Score([]impact.Candidate{{TestID: "t", Features: impact.Features{Reachable: true}}})
 			if err == nil {
-				t.Fatalf("Score = %s with no error", probsOf(got))
+				t.Fatalf("Score = %s with no error", localProbsString(got))
 			}
 			if !strings.Contains(err.Error(), "digest") {
 				t.Errorf("error %q does not name the digest", err)
