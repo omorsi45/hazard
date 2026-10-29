@@ -1,0 +1,63 @@
+{
+  "model": "typesafe/jev-1.13",
+  "state": {
+    "rubric": "A test BREAKS when the change alters any behavior the test observes, directly or indirectly. Indirect paths count: configuration defaults, environment variables, shared fixtures or testdata, serialized formats, error message text, exported constants, timing and ordering, database schema, and generated code. A test does NOT break merely because it lives near the change or imports the same package. Answer about a pass-to-fail transition, not about whether the change is correct.",
+    "change": {
+      "base": "a1b2c3d",
+      "head": "e4f5a6b",
+      "lines_added": 34,
+      "lines_removed": 12,
+      "files": [
+        {
+          "path": "internal/auth/token.go",
+          "kind": "source",
+          "status": "M",
+          "package": "github.com/omorsi45/x/internal/auth",
+          "hunk_summary": "6 lines changed in RefreshToken, (*Session).Renew: comparison operator changed, literal changed",
+          "symbols": ["RefreshToken", "(*Session).Renew"]
+        },
+        {
+          "path": "config/defaults.yaml",
+          "kind": "config",
+          "status": "M",
+          "hunk_summary": "1 line changed outside any declaration: literal changed",
+          "symbols": ["__file__"]
+        }
+      ]
+    },
+    "tests": {
+      "t_001": {
+        "name": "TestRefreshNearExpiry",
+        "package": "github.com/omorsi45/x/internal/auth",
+        "purpose": "refresh near expiry",
+        "hops_from_change": 0,
+        "covers_changed_lines": 23
+      },
+      "t_002": {
+        "name": "TestBillingInvoicePDF",
+        "package": "github.com/omorsi45/x/internal/billing",
+        "purpose": "billing invoice pdf",
+        "hops_from_change": 4,
+        "covers_changed_lines": 0
+      }
+    }
+  },
+  "questions": {
+    "t_001": {
+      "type": "noul",
+      "instructions": "Applying state.rubric to state.change, could the change cause state.tests.t_001 to go from passing to failing?",
+      "criteria": {
+        "false": "This test cannot observe any behavior the change alters.",
+        "true": "There is a plausible causal path from the change to behavior this test observes."
+      }
+    },
+    "t_002": {
+      "type": "noul",
+      "instructions": "Applying state.rubric to state.change, could the change cause state.tests.t_002 to go from passing to failing?",
+      "criteria": {
+        "false": "This test cannot observe any behavior the change alters.",
+        "true": "There is a plausible causal path from the change to behavior this test observes."
+      }
+    }
+  }
+}
