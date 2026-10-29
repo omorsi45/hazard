@@ -191,13 +191,20 @@ var goValueFlags = map[string]bool{
 	"fuzz": true, "fuzzminimizetime": true, "fuzztime": true, "gccgoflags": true,
 	"gcflags": true, "installsuffix": true, "ldflags": true, "memprofile": true,
 	"memprofilerate": true, "mod": true, "modfile": true, "mutexprofile": true,
-	"mutexprofilefraction": true, "o": true, "outputdir": true, "overlay": true,
+	"mutexprofilefraction": true, "outputdir": true, "overlay": true,
 	"p": true, "parallel": true, "pgo": true, "pkgdir": true, "shuffle": true,
 	"tags": true, "testlogfile": true, "timeout": true, "toolexec": true, "trace": true,
 	"vet": true,
 }
 
+// goNarrowingFlags select or list tests instead of running them all. They are
+// also refused after -args, where they reach the test binary as -test.run and
+// friends.
 var goNarrowingFlags = map[string]bool{"run": true, "skip": true, "list": true, "bench": true}
+
+// goNoRunFlags are go test flags that compile, print or save a binary without
+// running any test body.
+var goNoRunFlags = map[string]bool{"c": true, "n": true, "o": true}
 
 // goFlagName returns the normalized flag name of a "-name", "--name" or
 // "-name=value" argument. go test also accepts the "test." prefix.
@@ -223,7 +230,7 @@ func validateGoPassthrough(args []string) error {
 		if !isFlag {
 			return narrows(arg)
 		}
-		if goNarrowingFlags[name] {
+		if goNarrowingFlags[name] || goNoRunFlags[name] {
 			return narrows(arg)
 		}
 		if name == "args" {
@@ -248,6 +255,14 @@ var pytestNarrowingLong = map[string]bool{
 	"deselect": true, "lf": true, "last-failed": true, "ff": true, "failed-first": true,
 }
 
+// pytestNoRunLong are long options that collect, list or print without running
+// test bodies.
+var pytestNoRunLong = map[string]bool{
+	"collect-only": true, "co": true, "setup-only": true, "setup-plan": true,
+	"fixtures": true, "funcargs": true, "fixtures-per-test": true, "markers": true,
+	"help": true, "version": true,
+}
+
 // pytestValueLong are long options that take a separate value when written
 // without "=". Options missing here are read as flags, so a following non-flag
 // argument is a positional and is rejected.
@@ -261,7 +276,8 @@ var pytestValueLong = map[string]bool{
 }
 
 // pytestValueShort are short options whose value follows the letter, attached
-// or as the next argument. -k and -m are narrowing and handled separately.
+// or as the next argument. -k and -m are narrowing and handled separately, as
+// are -h and -V (help and version), which run no test.
 const pytestValueShort = "pWocnr"
 
 func validatePytestPassthrough(args []string) error {
@@ -275,7 +291,7 @@ func validatePytestPassthrough(args []string) error {
 			return nil
 		case strings.HasPrefix(arg, "--"):
 			name, _, hasValue := strings.Cut(arg[2:], "=")
-			if pytestNarrowingLong[name] {
+			if pytestNarrowingLong[name] || pytestNoRunLong[name] {
 				return narrows(arg)
 			}
 			if !hasValue && pytestValueLong[name] && takesSeparateValue(args, i) {
@@ -287,7 +303,7 @@ func validatePytestPassthrough(args []string) error {
 			cluster := arg[1:]
 			for j := 0; j < len(cluster); j++ {
 				c := cluster[j]
-				if c == 'k' || c == 'm' {
+				if c == 'k' || c == 'm' || c == 'h' || c == 'V' {
 					return narrows(arg)
 				}
 				if strings.IndexByte(pytestValueShort, c) >= 0 {
