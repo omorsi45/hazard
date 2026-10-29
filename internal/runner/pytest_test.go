@@ -11,26 +11,40 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+)
+
+// pytestProbe is the result of asking the interpreter for its pytest version.
+// Starting python and importing pytest is a process launch the package pays once,
+// not once per test.
+var (
+	pytestProbeOnce sync.Once
+	pytestProbePy   string
+	pytestProbeOut  []byte
+	pytestProbeErr  error
 )
 
 // pytestPython returns the interpreter for tests that need pytest: from
 // HAZARD_TEST_PYTHON, else python on PATH. When pytest is unavailable the test
-// is skipped only if HAZARD_REQUIRE_PYTEST is not "1" (contract D054).
+// is skipped only if HAZARD_REQUIRE_PYTEST is not "1" (contract D054). The
+// interpreter is probed once and every caller sees the same verdict.
 func pytestPython(t *testing.T) string {
 	t.Helper()
-	py := os.Getenv("HAZARD_TEST_PYTHON")
-	if py == "" {
-		py = "python"
-	}
-	out, err := exec.Command(py, "-m", "pytest", "--version").CombinedOutput()
-	if err != nil {
-		if os.Getenv("HAZARD_REQUIRE_PYTEST") == "1" {
-			t.Fatalf("pytest is required but unavailable (%s): %v\n%s", py, err, out)
+	pytestProbeOnce.Do(func() {
+		pytestProbePy = os.Getenv("HAZARD_TEST_PYTHON")
+		if pytestProbePy == "" {
+			pytestProbePy = "python"
 		}
-		t.Skipf("pytest unavailable (%s): %v", py, err)
+		pytestProbeOut, pytestProbeErr = exec.Command(pytestProbePy, "-m", "pytest", "--version").CombinedOutput()
+	})
+	if pytestProbeErr != nil {
+		if os.Getenv("HAZARD_REQUIRE_PYTEST") == "1" {
+			t.Fatalf("pytest is required but unavailable (%s): %v\n%s", pytestProbePy, pytestProbeErr, pytestProbeOut)
+		}
+		t.Skipf("pytest unavailable (%s): %v", pytestProbePy, pytestProbeErr)
 	}
-	return py
+	return pytestProbePy
 }
 
 func pyTarget(nodeID string) Target {

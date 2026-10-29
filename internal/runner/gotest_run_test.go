@@ -10,15 +10,15 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 const fixtureModule = "example.com/hazardfixture"
 
-func copyTree(t *testing.T, src, dst string) {
-	t.Helper()
-	err := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+func copyDir(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -36,7 +36,11 @@ func copyTree(t *testing.T, src, dst string) {
 		}
 		return os.WriteFile(target, data, 0o644)
 	})
-	if err != nil {
+}
+
+func copyTree(t *testing.T, src, dst string) {
+	t.Helper()
+	if err := copyDir(src, dst); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -47,6 +51,72 @@ func fixtureCopy(t *testing.T, name string) string {
 	dir := t.TempDir()
 	copyTree(t, filepath.Join("..", "..", "testdata", "repos", name), dir)
 	return dir
+}
+
+var (
+	goFixtureOnce sync.Once
+	goFixtureDir  string
+	goFixtureErr  error
+
+	bigModuleOnce  sync.Once
+	bigModuleDir   string
+	bigModuleNames []string
+	bigModuleErr   error
+)
+
+const (
+	bigModulePath = "example.com/big"
+	bigModulePkg  = bigModulePath + "/pkg"
+)
+
+// nativeGoFixture returns one copy of testdata/repos/go, shared by every test
+// that runs the real go command, so the packages they build are compiled once
+// and reused from go's build cache. Besides the fixture it holds the extra test
+// files those tests need, each in a package no other test runs. It is read-only:
+// a test sets an absolute JUnitPath so no report lands in it.
+func nativeGoFixture(t *testing.T) string {
+	t.Helper()
+	goFixtureOnce.Do(func() {
+		dir := filepath.Join(nativeRoot, "gofixture")
+		goFixtureDir, goFixtureErr = dir, copyDir(filepath.Join("..", "..", "testdata", "repos", "go"), dir)
+		if goFixtureErr != nil {
+			return
+		}
+		for rel, content := range map[string]string{
+			// A selected failing test, and a test that exists only with -tags=integration.
+			"core/fail_test.go":   "package core\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"deliberate failure\") }\n",
+			"core/tagged_test.go": "//go:build integration\n\npackage core\n\nimport \"testing\"\n\nfunc TestTagged(t *testing.T) {}\n",
+			// A package whose test binary does not build.
+			"brokenbuild/brokenbuild_test.go": "package brokenbuild\n\nimport \"testing\"\n\nfunc TestNeverBuilt(t *testing.T) {}\n\nfunc init() { undefinedSymbol() }\n",
+		} {
+			path := filepath.Join(dir, filepath.FromSlash(rel))
+			if goFixtureErr = os.MkdirAll(filepath.Dir(path), 0o755); goFixtureErr != nil {
+				return
+			}
+			if goFixtureErr = os.WriteFile(path, []byte(content), 0o644); goFixtureErr != nil {
+				return
+			}
+		}
+	})
+	if goFixtureErr != nil {
+		t.Fatalf("prepare the shared Go fixture: %v", goFixtureErr)
+	}
+	return goFixtureDir
+}
+
+// nativeBigModule returns a module with one package of 500 tests whose names
+// are 40 characters long, shared by the tests that select from it: its
+// directory, the package's import path and the test names. It is read-only.
+func nativeBigModule(t *testing.T) (dir, pkg string, names []string) {
+	t.Helper()
+	bigModuleOnce.Do(func() {
+		bigModuleDir = filepath.Join(nativeRoot, "big")
+		bigModuleNames, bigModuleErr = writeBigModule(bigModuleDir, 500)
+	})
+	if bigModuleErr != nil {
+		t.Fatalf("prepare the shared 500-test module: %v", bigModuleErr)
+	}
+	return bigModuleDir, bigModulePkg, bigModuleNames
 }
 
 func writeTestFile(t *testing.T, path, content string) {
@@ -329,15 +399,15 @@ func TestRunGoInvalidRequestFailsClosed(t *testing.T) {
 
 // ---- RunGo against the real go command ----
 //
-// Each real run costs a full go build, so these tests share as few runs as
-// possible and run in parallel.
+// Every real run pays go's fixed start-up cost (loading and cache-checking the
+// standard library), so these tests share as few runs as possible, run in
+// parallel, and build in shared read-only repositories (nativeGoFixture,
+// nativeBigModule) so go's build cache is reused across them.
 
 func TestRunGoNativeSelectionAnchoringAndExitCode(t *testing.T) {
 	t.Parallel()
-	dir := fixtureCopy(t, "go")
+	dir := nativeGoFixture(t)
 	core := fixtureModule + "/core"
-	writeTestFile(t, filepath.Join(dir, "core", "fail_test.go"), "package core\n\nimport \"testing\"\n\nfunc TestFails(t *testing.T) { t.Fatal(\"deliberate failure\") }\n")
-	writeTestFile(t, filepath.Join(dir, "core", "tagged_test.go"), "//go:build integration\n\npackage core\n\nimport \"testing\"\n\nfunc TestTagged(t *testing.T) {}\n")
 	req := Request{
 		RepoDir: dir,
 		Targets: []Target{
@@ -348,6 +418,7 @@ func TestRunGoNativeSelectionAnchoringAndExitCode(t *testing.T) {
 		},
 		GoTags:      []string{"integration"},
 		Passthrough: []string{"-count=2", "-vet=off"},
+		JUnitPath:   filepath.Join(t.TempDir(), "junit.xml"),
 	}
 	res, cases, stdout := runGoNative(t, req)
 	byName := casesByName(cases)
@@ -415,12 +486,13 @@ func TestRunGoNativeSelectionAnchoringAndExitCode(t *testing.T) {
 
 func TestRunGoNativeFullSuite(t *testing.T) {
 	t.Parallel()
-	dir := fixtureCopy(t, "go")
+	dir := nativeGoFixture(t)
 	res, cases, _ := runGoNative(t, Request{
 		RepoDir:     dir,
 		Full:        true,
 		GoPackages:  []string{"./left", "./right", "./top"},
 		Passthrough: []string{"-count=1", "-vet=off"},
+		JUnitPath:   filepath.Join(t.TempDir(), "junit.xml"),
 	})
 	if res.ExitCode != 0 || len(res.Invocations) != 1 || !res.Invocations[0].Whole {
 		t.Fatalf("result: %+v", res)
@@ -444,12 +516,13 @@ func TestRunGoNativeFullSuite(t *testing.T) {
 
 func TestRunGoNativeBuildFailureIsNonZeroAndNeverGreen(t *testing.T) {
 	t.Parallel()
-	dir := fixtureCopy(t, "go")
-	writeTestFile(t, filepath.Join(dir, "other", "broken_test.go"), "package other\n\nfunc init() { undefinedSymbol() }\n")
+	dir := nativeGoFixture(t)
+	report := filepath.Join(t.TempDir(), "junit.xml")
 	res, stdout, _, err := runGoRequest(t, Request{
 		RepoDir:     dir,
-		Targets:     []Target{goTarget(fixtureModule+"/other", "TestDouble")},
+		Targets:     []Target{goTarget(fixtureModule+"/brokenbuild", "TestNeverBuilt")},
 		Passthrough: []string{"-count=1", "-vet=off"},
+		JUnitPath:   report,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -460,7 +533,7 @@ func TestRunGoNativeBuildFailureIsNonZeroAndNeverGreen(t *testing.T) {
 	if !strings.Contains(stdout, "undefinedSymbol") {
 		t.Fatalf("build error not streamed:\n%s", stdout)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "junit.xml"))
+	data, err := os.ReadFile(report)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,34 +545,44 @@ func TestRunGoNativeBuildFailureIsNonZeroAndNeverGreen(t *testing.T) {
 	}
 }
 
-// writeBigModule writes a module with one package of n tests whose names are
-// 40 characters long and returns the module dir, import path and names.
-func writeBigModule(t *testing.T, n int) (string, string, []string) {
-	t.Helper()
-	dir := t.TempDir()
-	writeTestFile(t, filepath.Join(dir, "go.mod"), "module example.com/big\n\ngo 1.26\n")
+// writeBigModule writes a module with one package of n tests whose names are 40
+// characters long into dir and returns the test names.
+func writeBigModule(dir string, n int) ([]string, error) {
 	var sb strings.Builder
 	sb.WriteString("package pkg\n\nimport \"testing\"\n\n")
 	names := make([]string, n)
 	for i := range names {
 		names[i] = fmt.Sprintf("Test%04d_%s", i, strings.Repeat("x", 31))
 		if len(names[i]) != 40 {
-			t.Fatalf("name %q has %d characters", names[i], len(names[i]))
+			return nil, fmt.Errorf("name %q has %d characters", names[i], len(names[i]))
 		}
 		fmt.Fprintf(&sb, "func %s(t *testing.T) {}\n\n", names[i])
 	}
-	writeTestFile(t, filepath.Join(dir, "pkg", "pkg_test.go"), sb.String())
-	return dir, "example.com/big/pkg", names
+	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module "+bigModulePath+"\n\ngo 1.26\n"), 0o644); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pkg", "pkg_test.go"), []byte(sb.String()), 0o644); err != nil {
+		return nil, err
+	}
+	return names, nil
 }
 
 func TestRunGoFiveHundredTestsWidenToTheWholePackage(t *testing.T) {
 	t.Parallel()
-	dir, pkg, names := writeBigModule(t, 500)
+	dir, pkg, names := nativeBigModule(t)
 	targets := make([]Target, len(names))
 	for i, n := range names {
 		targets[i] = goTarget(pkg, n)
 	}
-	req := Request{RepoDir: dir, Targets: targets, Passthrough: []string{"-count=1", "-vet=off"}}
+	req := Request{
+		RepoDir:     dir,
+		Targets:     targets,
+		Passthrough: []string{"-count=1", "-vet=off"},
+		JUnitPath:   filepath.Join(t.TempDir(), "junit.xml"),
+	}
 
 	// Planning is checked before the slow native run so a regression fails fast.
 	invs, widened, err := GoInvocations(req)
@@ -521,13 +604,18 @@ func TestRunGoFiveHundredTestsWidenToTheWholePackage(t *testing.T) {
 
 func TestRunGoThreeOfFiveHundredTestsStayAnchored(t *testing.T) {
 	t.Parallel()
-	dir, pkg, names := writeBigModule(t, 500)
+	dir, pkg, names := nativeBigModule(t)
 	picked := []string{names[7], names[250], names[499]}
 	var targets []Target
 	for _, n := range picked {
 		targets = append(targets, goTarget(pkg, n))
 	}
-	req := Request{RepoDir: dir, Targets: targets, Passthrough: []string{"-count=1", "-vet=off"}}
+	req := Request{
+		RepoDir:     dir,
+		Targets:     targets,
+		Passthrough: []string{"-count=1", "-vet=off"},
+		JUnitPath:   filepath.Join(t.TempDir(), "junit.xml"),
+	}
 
 	invs, widened, err := GoInvocations(req)
 	if err != nil {

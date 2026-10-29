@@ -25,6 +25,10 @@ const fakePythonEnv = "HAZARD_RUNNER_FAKE_PY"
 // fakeGoDir holds copies of the test binary named like the go and python commands.
 var fakeGoDir string
 
+// nativeRoot holds the repositories that the tests running the real go command
+// share, so go's build cache is reused across them. Tests treat them as read-only.
+var nativeRoot string
+
 type fakeGoPackage struct {
 	Exit   int
 	Events []goEvent
@@ -64,9 +68,15 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	fakeGoDir = dir
-	code := m.Run()
-	if err := os.RemoveAll(dir); err != nil {
+	if nativeRoot, err = os.MkdirTemp("", "hazard-native-"); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	for _, d := range []string{dir, nativeRoot} {
+		if err := os.RemoveAll(d); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
 	}
 	os.Exit(code)
 }
