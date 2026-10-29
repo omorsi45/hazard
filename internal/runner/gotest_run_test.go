@@ -302,6 +302,21 @@ func TestRunGoUnwritableOutputIsAnErrorNotAGreenRun(t *testing.T) {
 	}
 }
 
+func TestRunGoReportWriteFailureAfterAPassingRunIsNeverExitZero(t *testing.T) {
+	// Every process passes, then publishing the report fails (a non-empty
+	// directory sits at the report path). The error must come with the
+	// internal exit code, never with 0.
+	report := filepath.Join(t.TempDir(), "junit.xml")
+	useFakeGo(t, fakeGoSpec{BlockPath: report, Packages: map[string]fakeGoPackage{"p/a": passPackage("p/a", "TestA")}})
+	res, _, _, err := runGoRequest(t, Request{RepoDir: t.TempDir(), Targets: []Target{goTarget("p/a", "TestA")}, JUnitPath: report})
+	if err == nil {
+		t.Fatalf("the report write failure was swallowed: %+v", res)
+	}
+	if res.ExitCode != exitInternal {
+		t.Fatalf("exit code %d with error %v, want %d", res.ExitCode, err, exitInternal)
+	}
+}
+
 func TestRunGoInvalidRequestFailsClosed(t *testing.T) {
 	res, err := RunGo(context.Background(), Request{RepoDir: t.TempDir(), Passthrough: []string{"-run", "X"}, Full: true})
 	if !errors.Is(err, ErrPassthroughNarrows) {

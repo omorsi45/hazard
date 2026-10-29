@@ -28,8 +28,17 @@ const pytestMissingReason = "pytest_missing_ids"
 // A narrowed run passes the node IDs in a UTF-8 file named by HAZARD_SELECTION,
 // never on argv. If any selected ID matches nothing, the plugin ends the run
 // before a test executes and RunPytest reports Abstained with the sorted
-// Missing IDs, whatever the exit code. Otherwise ExitCode is pytest's own.
+// Missing IDs, whatever the exit code. Otherwise ExitCode is pytest's own. It
+// is never 0 when an error is returned, including an error that only appears
+// when the temp files are removed after a passing run.
 func RunPytest(ctx context.Context, req Request) (res Result, err error) {
+	// Registered first so it runs after the cleanup defers below: a cleanup
+	// failure after a passing run must not leave exit code 0 next to an error.
+	defer func() {
+		if err != nil && res.ExitCode == 0 {
+			res.ExitCode = exitInternal
+		}
+	}()
 	if err := ValidatePassthrough("python", req.Passthrough); err != nil {
 		return Result{ExitCode: exitInternal}, err
 	}
@@ -103,9 +112,6 @@ func RunPytest(ctx context.Context, req Request) (res Result, err error) {
 	}
 	missing, err := readMissingIDs(missingPath)
 	if err != nil {
-		if res.ExitCode == 0 {
-			res.ExitCode = exitInternal
-		}
 		return res, err
 	}
 	if len(missing) > 0 {

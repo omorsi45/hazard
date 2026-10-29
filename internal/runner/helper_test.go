@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,6 +37,9 @@ type fakeGoSpec struct {
 	// Log is a file that receives one fakeGoCall per run.
 	Log     string
 	SleepMS int
+	// BlockPath, when set, becomes a non-empty directory during the run, so
+	// publishing a file to that path fails after a passing run.
+	BlockPath string
 }
 
 type fakeGoCall struct {
@@ -109,6 +113,21 @@ type fakePythonSpec struct {
 	Missing []string
 	// DeleteMissingOut removes the missing-ids file, as a crashed plugin would.
 	DeleteMissingOut bool
+	// BlockSelection replaces the selection file with a non-empty directory, so
+	// removing it during cleanup fails after a passing run.
+	BlockSelection bool
+}
+
+// blockWithDirectory replaces whatever is at path with a non-empty directory:
+// removing it with os.Remove then fails with "directory not empty".
+func blockWithDirectory(path string) error {
+	if path == "" {
+		return errors.New("no path to block")
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return err
+	}
+	return os.MkdirAll(filepath.Join(path, "keep"), 0o755)
 }
 
 func runFakePython(raw string) int {
@@ -116,6 +135,12 @@ func runFakePython(raw string) int {
 	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
 		fmt.Fprintln(os.Stderr, "fake python: bad spec:", err)
 		return 98
+	}
+	if spec.BlockSelection {
+		if err := blockWithDirectory(os.Getenv("HAZARD_SELECTION")); err != nil {
+			fmt.Fprintln(os.Stderr, "fake python:", err)
+			return 98
+		}
 	}
 	if out := os.Getenv("HAZARD_MISSING_OUT"); out != "" && spec.DeleteMissingOut {
 		if err := os.Remove(out); err != nil {
@@ -174,6 +199,12 @@ func runFakeGo(raw string) int {
 	if !ok {
 		fmt.Fprintf(os.Stderr, "fake go: no scenario for %q\n", args[len(args)-1])
 		return 98
+	}
+	if spec.BlockPath != "" {
+		if err := blockWithDirectory(spec.BlockPath); err != nil {
+			fmt.Fprintln(os.Stderr, "fake go:", err)
+			return 98
+		}
 	}
 	for _, ev := range pkg.Events {
 		b, err := json.Marshal(ev)

@@ -105,6 +105,12 @@ func TestRunPytestNarrowedRunExecutesExactlyTheSelectedTests(t *testing.T) {
 	if got := pyCaseKeys(cases); !slices.Equal(got, want) {
 		t.Fatalf("executed %q, want %q (test_base must be deselected)", got, want)
 	}
+	// 2 of the fixture's 14 tests are selected. The plugin must tell pytest
+	// about the other 12 (pytest_deselected), or pytest's own report and every
+	// other plugin never learn that they were deselected.
+	if !strings.Contains(out, "12 deselected") {
+		t.Fatalf("pytest's output does not report the 12 deselected tests:\n%s", out)
+	}
 }
 
 func TestRunPytestSpecialCharacterIDsSelectExactlyTheRequestedCases(t *testing.T) {
@@ -281,6 +287,25 @@ func TestRunPytestUnreadableMissingFileIsAnErrorNeverGreen(t *testing.T) {
 	})
 	if err == nil || res.ExitCode == 0 {
 		t.Fatalf("exit %d, err %v", res.ExitCode, err)
+	}
+}
+
+func TestRunPytestCleanupFailureAfterAPassingRunIsNeverExitZero(t *testing.T) {
+	// pytest passes and the missing-ids file is read, then removing the
+	// selection file fails: the error must come with the internal exit code,
+	// never with 0, so a caller that ignores the error cannot report green.
+	t.Setenv(fakePythonEnv, mustJSON(t, fakePythonSpec{Exit: 0, BlockSelection: true}))
+	res, _, _, err := runPytestRequest(t, Request{
+		RepoDir: t.TempDir(), Python: filepath.Join(fakeGoDir, "python"+exeSuffix()), Targets: pyTargets("a::x"),
+	})
+	if err == nil {
+		t.Fatalf("the cleanup failure was swallowed: %+v", res)
+	}
+	if res.ExitCode != exitInternal {
+		t.Fatalf("exit code %d with error %v, want %d", res.ExitCode, err, exitInternal)
+	}
+	if res.Abstained {
+		t.Fatalf("a cleanup failure is not an abstention: %+v", res)
 	}
 }
 
