@@ -32,6 +32,7 @@ const (
 
 	// Sources of a Prob.
 	sourceJev     = "jev"
+	sourceCache   = "cache"
 	sourceFailed  = "jev_failed"
 	sourceInvalid = "jev_invalid"
 	sourceBudget  = "budget_exhausted"
@@ -248,7 +249,26 @@ func (j *Jev) predict(ctx context.Context, ch *change.ChangeSet, cands []impact.
 	if err != nil {
 		return nil, err
 	}
-	pending := b.descs
+	pending := make([]*descriptor, 0, len(b.descs))
+	cacheModel := ""
+	cacheReadable := j.cache != nil
+	for _, d := range b.descs {
+		if cacheReadable {
+			hit, found, err := j.cache.get(ctx, b.cacheKey(d))
+			if err != nil {
+				j.warn(stats, "the judgment cache cannot be read and every test is asked: %v", err)
+				cacheReadable = false
+			} else if found {
+				probs[d.index] = Prob{TestID: d.testID, P: hit.p, Source: sourceCache, Shard: -1, Truncated: d.truncated}
+				stats.CacheHits++
+				if cacheModel == "" {
+					cacheModel = hit.model
+				}
+				continue
+			}
+		}
+		pending = append(pending, d)
+	}
 
 	shards, err := b.shards(pending)
 	if err != nil {
@@ -260,6 +280,7 @@ func (j *Jev) predict(ctx context.Context, ch *change.ChangeSet, cands []impact.
 		return j.finish(cands, probs)
 	}
 
+	var rows []judgmentRow
 	var drift, canceled error
 	for _, out := range j.dispatch(ctx, shards) {
 		stats.Requests += out.requests
@@ -285,8 +306,11 @@ func (j *Jev) predict(ctx context.Context, ch *change.ChangeSet, cands []impact.
 				probs[d.index] = failedProb(d, sourceFailed, -1)
 			}
 		default:
-			j.answered(stats, probs, out)
+			rows = j.answered(stats, probs, out, b, rows)
 		}
+	}
+	if stats.ServedModel == "" {
+		stats.ServedModel = cacheModel
 	}
 	if stats.BudgetSkipped > 0 {
 		j.warn(stats, "the budget of $%.6f is reached: %d shard(s) were not sent and their tests are selected", j.budget, stats.BudgetSkipped)
@@ -296,6 +320,15 @@ func (j *Jev) predict(ctx context.Context, ch *change.ChangeSet, cands []impact.
 	}
 	if canceled != nil {
 		return nil, fmt.Errorf("jev: %w", canceled)
+	}
+	if cacheReadable && len(rows) > 0 {
+		at := j.now()
+		for _, row := range rows {
+			if err := j.cache.put(ctx, row, at); err != nil {
+				j.warn(stats, "judgments could not be cached: %v", err)
+				break
+			}
+		}
 	}
 	return j.finish(cands, probs)
 }
@@ -312,8 +345,9 @@ func failedProb(d *descriptor, source string, shard int) Prob {
 	return Prob{TestID: d.testID, P: failedShardP, Source: source, Shard: shard, Truncated: d.truncated}
 }
 
-// answered records the answers of a shard that came back.
-func (j *Jev) answered(stats *JevStats, probs []Prob, out *outcome) {
+// answered records the answers of a shard that came back and returns rows,
+// extended by the judgments worth caching.
+func (j *Jev) answered(stats *JevStats, probs []Prob, out *outcome, b *batch, rows []judgmentRow) []judgmentRow {
 	s := out.shard
 	stats.CostUSD += out.cost
 	switch {
@@ -338,6 +372,10 @@ func (j *Jev) answered(stats *JevStats, probs []Prob, out *outcome) {
 		p := Prob{TestID: d.testID, Source: sourceJev, LatencyMS: latency, CostUSD: share, Shard: s.index, Truncated: d.truncated}
 		if a := out.answers[i]; a.ok {
 			p.P = a.p
+			rows = append(rows, judgmentRow{
+				key: b.cacheKey(d), testID: d.testID, model: out.served, rubric: j.rubric.version,
+				p: a.p, latencyMS: latency, costUSD: share,
+			})
 		} else {
 			p.P, p.Source = failedShardP, sourceInvalid
 			invalid++
@@ -347,6 +385,7 @@ func (j *Jev) answered(stats *JevStats, probs []Prob, out *outcome) {
 	if invalid > 0 {
 		j.warn(stats, "shard %d: %d of %d answers are missing or invalid and those tests are selected", s.index, invalid, len(s.members))
 	}
+	return rows
 }
 
 // answer is the probability read from one noul answer.
