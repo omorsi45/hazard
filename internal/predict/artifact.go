@@ -118,6 +118,21 @@ func (a StaticArtifact) validate() error {
 	return a.Model.validate()
 }
 
+// verify is validate plus the check that Digest matches the content.
+func (a StaticArtifact) verify() error {
+	if err := a.validate(); err != nil {
+		return err
+	}
+	digest, err := a.computeDigest()
+	if err != nil {
+		return err
+	}
+	if digest != a.Digest {
+		return fmt.Errorf("digest %q does not match the content (%s)", a.Digest, digest)
+	}
+	return nil
+}
+
 // validate checks the schema, the feature version and the model, but not the
 // digest.
 func (a LogisticArtifact) validate() error {
@@ -126,6 +141,21 @@ func (a LogisticArtifact) validate() error {
 	}
 	if err := a.Model.validate(); err != nil {
 		return fmt.Errorf("logistic model: %w", err)
+	}
+	return nil
+}
+
+// verify is validate plus the check that Digest matches the content.
+func (a LogisticArtifact) verify() error {
+	if err := a.validate(); err != nil {
+		return err
+	}
+	digest, err := a.computeDigest()
+	if err != nil {
+		return err
+	}
+	if digest != a.Digest {
+		return fmt.Errorf("digest %q does not match the content (%s)", a.Digest, digest)
 	}
 	return nil
 }
@@ -152,15 +182,8 @@ func ReadStatic(path string) (StaticArtifact, error) {
 	if err := readJSON(path, &a); err != nil {
 		return StaticArtifact{}, err
 	}
-	if err := a.validate(); err != nil {
+	if err := a.verify(); err != nil {
 		return StaticArtifact{}, fmt.Errorf("static artifact %s: %w", path, err)
-	}
-	digest, err := a.computeDigest()
-	if err != nil {
-		return StaticArtifact{}, err
-	}
-	if digest != a.Digest {
-		return StaticArtifact{}, fmt.Errorf("static artifact %s: digest %q does not match its content (%s)", path, a.Digest, digest)
 	}
 	return a, nil
 }
@@ -187,15 +210,8 @@ func ReadLogistic(path string) (LogisticArtifact, error) {
 	if err := readJSON(path, &a); err != nil {
 		return LogisticArtifact{}, err
 	}
-	if err := a.validate(); err != nil {
+	if err := a.verify(); err != nil {
 		return LogisticArtifact{}, fmt.Errorf("logistic artifact %s: %w", path, err)
-	}
-	digest, err := a.computeDigest()
-	if err != nil {
-		return LogisticArtifact{}, err
-	}
-	if digest != a.Digest {
-		return LogisticArtifact{}, fmt.Errorf("logistic artifact %s: digest %q does not match its content (%s)", path, a.Digest, digest)
 	}
 	return a, nil
 }
