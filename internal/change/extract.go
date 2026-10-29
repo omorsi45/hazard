@@ -36,6 +36,10 @@ const fileLevel = "__file__"
 // Removed lines are attributed to declarations of the base contents and added
 // lines to declarations of the head contents (see Hunk). Every git failure is
 // returned wrapped with its argv and stderr; none becomes an empty change.
+//
+// Hazard's own state directory, .hazard/ at the repository root, is never part
+// of the result: a path under it on either side of a change is omitted, and a
+// work tree that differs from HEAD only there is not Dirty.
 func Extract(ctx context.Context, repoDir string, opts Options) (cs *ChangeSet, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -88,6 +92,7 @@ func Extract(ctx context.Context, repoDir string, opts Options) (cs *ChangeSet, 
 	if err != nil {
 		return nil, fmt.Errorf("git diff %s: %w", baseSHA, err)
 	}
+	entries, droppedState := withoutHazardState(entries)
 
 	var st statusReport
 	if workTree {
@@ -101,7 +106,12 @@ func Extract(ctx context.Context, repoDir string, opts Options) (cs *ChangeSet, 
 		if len(st.unmerged) > 0 {
 			return nil, fmt.Errorf("unmerged paths: %s; resolve the conflicts first", strings.Join(st.unmerged, ", "))
 		}
+		var droppedUntracked bool
+		st.untracked, droppedUntracked = withoutHazardPaths(st.untracked)
+		droppedState = droppedState || droppedUntracked
 	}
+	// A work tree whose only differences are Hazard's own files is clean.
+	dirty := workTree && st.dirty && !(droppedState && len(entries) == 0 && len(st.untracked) == 0)
 
 	files, err := buildFiles(ctx, root, entries, st.untracked, workTree, opts)
 	if err != nil {
@@ -112,7 +122,7 @@ func Extract(ctx context.Context, repoDir string, opts Options) (cs *ChangeSet, 
 		HeadSHA:      headSHA,
 		Files:        files,
 		TriggersFull: matchTriggers(files, opts.FullSuiteTriggers),
-		Dirty:        workTree && st.dirty,
+		Dirty:        dirty,
 	}
 	for _, f := range files {
 		if f.Binary {
@@ -124,6 +134,41 @@ func Extract(ctx context.Context, repoDir string, opts Options) (cs *ChangeSet, 
 		}
 	}
 	return cs, nil
+}
+
+// hazardStateDir is Hazard's own state directory at the repository root (the
+// index, the history database, the lock cache). Its files are never part of a
+// change set, whether or not the repository ignores them.
+const hazardStateDir = ".hazard/"
+
+// inHazardState reports whether the repo-relative path lies under .hazard/.
+func inHazardState(p string) bool { return strings.HasPrefix(p, hazardStateDir) }
+
+// withoutHazardState drops every diff entry whose path or old path lies under
+// .hazard/ and reports whether it dropped any.
+func withoutHazardState(entries []diffEntry) (kept []diffEntry, dropped bool) {
+	kept = make([]diffEntry, 0, len(entries))
+	for _, e := range entries {
+		if inHazardState(e.path) || inHazardState(e.oldPath) {
+			dropped = true
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept, dropped
+}
+
+// withoutHazardPaths drops the paths under .hazard/ and reports whether it
+// dropped any.
+func withoutHazardPaths(paths []string) (kept []string, dropped bool) {
+	for _, p := range paths {
+		if inHazardState(p) {
+			dropped = true
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return kept, dropped
 }
 
 // privateIndex copies the index at indexPath into a temporary directory and
