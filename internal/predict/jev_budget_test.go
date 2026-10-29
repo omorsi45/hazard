@@ -153,7 +153,7 @@ func TestJevBudgetUnusableUsageCostCountsTheReservation(t *testing.T) {
 	for name, template := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := newFake(t, func(_ int, _ []byte, w http.ResponseWriter, _ *http.Request) {
-				fmt.Fprintf(w, template, servedSnapshot)
+				_, _ = fmt.Fprintf(w, template, servedSnapshot)
 			})
 			j := f.jev(t, nil)
 			want := shardReservation(t, j, 2)

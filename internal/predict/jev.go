@@ -64,6 +64,15 @@ type JevOptions struct {
 	AskTier bool
 }
 
+// String describes the options without the API key, so that printing them
+// with any verb cannot leak it.
+func (o JevOptions) String() string {
+	return fmt.Sprintf("JevOptions{model: %s, redact: %s, rubric: %s, key: [redacted]}", o.Config.Model, o.Privacy.Redact, o.RubricVersion)
+}
+
+// GoString is String for the %#v verb.
+func (o JevOptions) GoString() string { return o.String() }
+
 // JevStats describes the last call of Predict.
 type JevStats struct {
 	// Requests counts the HTTP requests sent, retries included.
@@ -104,6 +113,12 @@ type Jev struct {
 }
 
 var _ Predictor = (*Jev)(nil)
+
+// String names the client without its API key.
+func (j *Jev) String() string { return "Jev{model: " + j.cfg.Model + ", key: [redacted]}" }
+
+// GoString is String for the %#v verb.
+func (j *Jev) GoString() string { return j.String() }
 
 // NewJev validates opts and returns a client. It refuses when the external
 // predictor is disabled, when the redaction level cannot be sent (hash and

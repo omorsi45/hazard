@@ -473,7 +473,7 @@ func TestJevTransportMissingOrMalformedAnswers(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFake(t, func(_ int, _ []byte, w http.ResponseWriter, _ *http.Request) {
-				fmt.Fprintf(w, `{"model":%q,"answers":%s,"usage":{"cost":0.0002}}`, servedSnapshot, tc.answers)
+				_, _ = fmt.Fprintf(w, `{"model":%q,"answers":%s,"usage":{"cost":0.0002}}`, servedSnapshot, tc.answers)
 			})
 			j := f.jev(t, nil)
 			probs, err := j.Predict(t.Context(), goldenChange(), candidatesN(2))
@@ -504,7 +504,7 @@ func TestJevTransportPartialFixtureKeepsTheValidAnswer(t *testing.T) {
 		t.Fatalf("probs = %+v, want both 1.0: one out of range, one missing", probs)
 	}
 	f2 := newFake(t, func(_ int, _ []byte, w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, `{"model":%q,"answers":{"t_002":{"type":"noul","noul":0.3}},"usage":{"cost":0.0002}}`, servedSnapshot)
+		_, _ = fmt.Fprintf(w, `{"model":%q,"answers":{"t_002":{"type":"noul","noul":0.3}},"usage":{"cost":0.0002}}`, servedSnapshot)
 	})
 	probs, err = f2.jev(t, nil).Predict(t.Context(), goldenChange(), goldenCandidates())
 	if err != nil {
@@ -787,7 +787,7 @@ func TestJevTierAnswerIsRecorded(t *testing.T) {
 				if answer != "" {
 					tier = `"tier":` + answer + `,`
 				}
-				fmt.Fprintf(w, `{"model":%q,"answers":{%s"t_001":{"type":"noul","noul":0.5},"t_002":{"type":"noul","noul":0.5}},"usage":{"cost":0.0002}}`, servedSnapshot, tier)
+				_, _ = fmt.Fprintf(w, `{"model":%q,"answers":{%s"t_001":{"type":"noul","noul":0.5},"t_002":{"type":"noul","noul":0.5}},"usage":{"cost":0.0002}}`, servedSnapshot, tier)
 			})
 			j := f.jev(t, func(o *JevOptions) { o.AskTier = true })
 			probs, err := j.Predict(t.Context(), goldenChange(), goldenCandidates())
