@@ -1254,6 +1254,7 @@ func TestRunEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v\nlog:\n%s", err, guard.logText())
 	}
+	t.Logf("run log:\n%s", guard.logText())
 	guard.finish(t)
 	if guard.applied != 4 {
 		t.Errorf("applied %d mutants, want 4", guard.applied)
@@ -1331,6 +1332,7 @@ func TestRunFlakyKillerIsUnconfirmed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v\nlog:\n%s", err, guard.logText())
 	}
+	t.Logf("run log:\n%s", guard.logText())
 	guard.finish(t)
 	if log := guard.logText(); !strings.Contains(log, "executing 1 of 1 mutants on 1 slots") {
 		t.Errorf("the slot count must not exceed the mutant count; log:\n%s", log)
@@ -1365,6 +1367,7 @@ func TestRunTimeoutMutant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v\nlog:\n%s", err, guard.logText())
 	}
+	t.Logf("run log:\n%s", guard.logText())
 	guard.finish(t)
 	if len(sum.Records) != 1 || sum.Records[0].Status != "timeout" || len(sum.Records[0].Killers) != 0 {
 		t.Fatalf("records = %+v, want one timeout record with no killers", sum.Records)
