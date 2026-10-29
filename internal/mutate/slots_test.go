@@ -3,6 +3,7 @@ package mutate
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,5 +96,29 @@ func TestExtractTarRejectsEscapingEntries(t *testing.T) {
 				t.Fatalf("an entry escaped the slot: %v", entries)
 			}
 		})
+	}
+}
+
+func TestTopLevelFindsTheRepositoryRootFromASubdirectory(t *testing.T) {
+	repo := newRepo(t, map[string]string{"a/b/c.txt": "x\n"})
+	got, err := TopLevel(context.Background(), filepath.Join(repo, "a", "b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Stat(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotInfo, err := os.Stat(got)
+	if err != nil || !os.SameFile(want, gotInfo) {
+		t.Errorf("TopLevel = %q (%v), want the directory %s", got, err, repo)
+	}
+}
+
+func TestTopLevelOutsideARepositoryIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	if got, err := TopLevel(context.Background(), dir); err == nil {
+		t.Errorf("TopLevel(%s) = %q, want an error outside a git work tree", dir, got)
 	}
 }

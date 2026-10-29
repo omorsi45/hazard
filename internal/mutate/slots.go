@@ -146,6 +146,19 @@ func gitOutput(ctx context.Context, dir string, args ...string) ([]byte, error) 
 	return stdout.Bytes(), nil
 }
 
+// TopLevel returns the root of the git work tree that contains dir.
+func TopLevel(ctx context.Context, dir string) (string, error) {
+	out, err := gitOutput(ctx, dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("mutate: %s is not inside a git work tree: %w", dir, err)
+	}
+	top := strings.TrimSpace(string(out))
+	if top == "" {
+		return "", fmt.Errorf("mutate: git reports no work tree root for %s", dir)
+	}
+	return filepath.Clean(top), nil
+}
+
 // resolveBase returns the commit SHA that base names in repoDir.
 func resolveBase(ctx context.Context, repoDir, base string) (string, error) {
 	if base == "" || strings.HasPrefix(base, "-") {

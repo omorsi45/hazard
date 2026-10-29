@@ -16,6 +16,7 @@ import (
 
 	"github.com/omorsi45/hazard/internal/index"
 	"github.com/omorsi45/hazard/internal/mine"
+	"github.com/omorsi45/hazard/internal/mutate"
 )
 
 const version = "0.1.0-dev"
@@ -81,15 +82,7 @@ func NewRoot() *cobra.Command {
 	}
 	root.AddCommand(labels)
 
-	mutate := leaf("mutate", "Generate mutation labels")
-	mutate.Flags().String("base", "HEAD", "base revision")
-	mutate.Flags().String("files", "internal/**/*.go", "file glob")
-	mutate.Flags().Int("n", 500, "mutation count")
-	mutate.Flags().String("operators", "cmp,logic,const,ret,stmt,cfg", "mutation operators")
-	mutate.Flags().Duration("timeout", 300000000000, "per-mutation timeout")
-	mutate.Flags().Int("concurrency", 4, "mutation concurrency")
-	mutate.Flags().String("out", ".hazard/mutants.jsonl", "output path")
-	root.AddCommand(mutate)
+	root.AddCommand(newMutateCommand(mutate.Run))
 
 	calibrate := leaf("calibrate", "Calibrate selection risk")
 	calibrate.Flags().Float64("alpha", 0.01, "target miss rate")
