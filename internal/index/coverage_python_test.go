@@ -104,8 +104,20 @@ func TestCoveragePythonReadDBAndAttribute(t *testing.T) {
 	if got := data["tests.test_calc.test_add"]["pkg/abs.py"]; !reflect.DeepEqual(got, []int{2}) {
 		t.Errorf("absolute paths inside the repository must become relative: %v", data["tests.test_calc.test_add"])
 	}
-	if got := data[""]["tests/test_calc.py"]; !reflect.DeepEqual(got, []int{1, 2}) {
-		t.Errorf("backslashes must become slashes: %v", data[""])
+	// A backslash separates path elements only where filepath.Separator is one
+	// (Windows). Elsewhere it is an ordinary filename character: the name stays
+	// verbatim and must never be attributed to a different real file.
+	if filepath.Separator == '\\' {
+		if got := data[""]["tests/test_calc.py"]; !reflect.DeepEqual(got, []int{1, 2}) {
+			t.Errorf("backslashes must become slashes on Windows: %v", data[""])
+		}
+	} else {
+		if got := data[""][`tests\test_calc.py`]; !reflect.DeepEqual(got, []int{1, 2}) {
+			t.Errorf("a backslash is a filename character on this platform and the name must be kept verbatim: %v", data[""])
+		}
+		if got, ok := data[""]["tests/test_calc.py"]; ok {
+			t.Errorf("a backslash name must not be attributed to tests/test_calc.py on this platform: %v", got)
+		}
 	}
 	for ctx, files := range data {
 		for f := range files {
