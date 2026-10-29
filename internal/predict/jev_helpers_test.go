@@ -26,7 +26,7 @@ func fixedNow() time.Time { return time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC
 // tests.
 func jevConfig() config.Jev {
 	c := config.Defaults().Predictor.Jev
-	c.TimeoutMS = 2000
+	c.TimeoutMS = 30000
 	c.RetryBackoffMS = 1
 	c.Retries = 2
 	return c

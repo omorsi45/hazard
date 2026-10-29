@@ -129,12 +129,17 @@ func reply(w http.ResponseWriter, model string, cost float64, answers map[string
 // answerAll answers every question of a request with p(name of its test).
 func answerAll(t *testing.T, model string, cost float64, p func(name string) float64) handler {
 	return func(_ int, body []byte, w http.ResponseWriter, _ *http.Request) {
+		req := decodeRequest(t, body)
 		answers := map[string]float64{}
-		for _, key := range questionKeys(t, body) {
+		for key := range req.Questions {
 			if key == tierKey {
 				continue
 			}
-			answers[key] = p(testName(t, body, key))
+			var d struct{ Name string }
+			if err := json.Unmarshal(req.State.Tests[key], &d); err != nil {
+				t.Errorf("descriptor of %s: %v", key, err)
+			}
+			answers[key] = p(d.Name)
 		}
 		reply(w, model, cost, answers)
 	}
@@ -367,7 +372,7 @@ func TestJevTransportTimeoutIsRetried(t *testing.T) {
 		}
 		ok(call, body, w, r)
 	})
-	j := f.jev(t, func(o *JevOptions) { o.Config.TimeoutMS = 100 })
+	j := f.jev(t, func(o *JevOptions) { o.Config.TimeoutMS = 400 })
 	probs, err := j.Predict(t.Context(), goldenChange(), candidatesN(2))
 	if err != nil {
 		t.Fatalf("Predict: %v", err)

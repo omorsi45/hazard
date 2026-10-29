@@ -105,7 +105,9 @@ func TestEnsembleNeitherSignalCanSuppressTheOther(t *testing.T) {
 }
 
 func TestEnsembleFailedRemoteShardSelectsEverything(t *testing.T) {
-	f := newFake(t, func(_ int, _ []byte, w http.ResponseWriter, _ *http.Request) { http.Error(w, "down", 503) })
+	f := newFake(t, func(_ int, _ []byte, w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	})
 	e := Ensemble{
 		Local:  &stub{name: "logistic", answer: fixed("logistic", 0, 0.2, 0.05)},
 		Remote: f.jev(t, nil),

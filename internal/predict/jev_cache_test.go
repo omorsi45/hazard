@@ -322,7 +322,9 @@ func TestJevCacheKeepsTheTruncatedFlag(t *testing.T) {
 
 func TestJevCacheDoesNotStoreWhatIsNotAnAnswer(t *testing.T) {
 	t.Run("failed shard", func(t *testing.T) {
-		f := newFake(t, func(_ int, _ []byte, w http.ResponseWriter, _ *http.Request) { http.Error(w, "x", 503) })
+		f := newFake(t, func(_ int, _ []byte, w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "x", http.StatusServiceUnavailable)
+		})
 		db := openCacheDB(t)
 		if _, err := cachedJev(t, f, db, nil).Predict(t.Context(), goldenChange(), candidatesN(3)); err != nil {
 			t.Fatal(err)
