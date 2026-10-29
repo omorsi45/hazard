@@ -886,6 +886,89 @@ func newFakeGo(t *testing.T, script func(fakeCall) (cmdResult, error)) *fakeGo {
 
 // ---- the procedure around the go command, without launching it ----
 
+// fixtureWant is what a run must report for one mutant of the shared fixture.
+type fixtureWant struct {
+	operator, status             string
+	killers, unreachable, beyond []string
+}
+
+// fixtureWants lists the six mutants of calc/*.go and config/*.yaml under the
+// cmp, ret and cfg operators and the outcome of each, whether the go command is
+// scripted or real: a killed mutant that a dependent package also sees, a
+// configuration mutant that only a package with no import path to it kills, a
+// survivor, a build failure, a timeout and a killer that fails only once.
+// Packages are one hop from calc, so the run must use MaxHops 0.
+func fixtureWants() map[string]fixtureWant {
+	tid := func(pkg, name string) string { return "go:" + pkg + ":" + name }
+	return map[string]fixtureWant{
+		"calc/fix.go":        {"cmp", "killed", []string{tid(pkgApp, "TestNormalize"), tid(pkgCalc, "TestFix")}, nil, []string{tid(pkgApp, "TestNormalize")}},
+		"calc/settle.go":     {"cmp", "survived", nil, nil, nil},
+		"calc/check.go":      {"ret", "build_error", nil, nil, nil},
+		"calc/count.go":      {"cmp", "timeout", nil, nil, nil},
+		"calc/armed.go":      {"ret", "unconfirmed", nil, nil, nil},
+		"config/limits.yaml": {"cfg", "killed", []string{tid(pkgCfgcheck, "TestLimits")}, []string{tid(pkgCfgcheck, "TestLimits")}, nil},
+	}
+}
+
+// requireOutcome asserts that the summary reports exactly the wanted mutants:
+// one record each, and the counts those records imply.
+func requireOutcome(t *testing.T, sum Summary, sha string, wants map[string]fixtureWant) {
+	t.Helper()
+	byStatus, byOperator := map[string]int{}, map[string]int{}
+	var unreachable, fully, beyond int
+	for _, w := range wants {
+		byStatus[w.status]++
+		byOperator[w.operator]++
+		if len(w.unreachable) > 0 {
+			unreachable++
+			if len(w.unreachable) == len(w.killers) {
+				fully++
+			}
+		}
+		if len(w.beyond) > 0 {
+			beyond++
+		}
+	}
+	n := len(wants)
+	if sum.BaseSHA != sha || sum.Candidates != n || sum.Executed != n || sum.BaselineSeconds <= 0 {
+		t.Errorf("header = base %q candidates %d executed %d baseline %.4fs; want %q %d %d >0", sum.BaseSHA, sum.Candidates, sum.Executed, sum.BaselineSeconds, sha, n, n)
+	}
+	if !reflect.DeepEqual(sum.ByStatus, byStatus) {
+		t.Errorf("ByStatus = %v, want %v", sum.ByStatus, byStatus)
+	}
+	if !reflect.DeepEqual(sum.ByOperator, byOperator) {
+		t.Errorf("ByOperator = %v, want %v", sum.ByOperator, byOperator)
+	}
+	if sum.Usable != byStatus["killed"] || sum.UnreachableMutants != unreachable || sum.FullyUnreachableMutants != fully || sum.BeyondMaxHopsMutants != beyond {
+		t.Errorf("usable %d unreachable %d fully %d beyond %d; want %d %d %d %d", sum.Usable, sum.UnreachableMutants, sum.FullyUnreachableMutants, sum.BeyondMaxHopsMutants, byStatus["killed"], unreachable, fully, beyond)
+	}
+	if len(sum.Records) != n {
+		t.Fatalf("records = %d, want %d: %+v", len(sum.Records), n, sum.Records)
+	}
+	for _, r := range sum.Records {
+		w, ok := wants[r.File]
+		if !ok {
+			t.Errorf("unexpected record for %s: %+v", r.File, r)
+			continue
+		}
+		if r.Status != w.status || r.Operator != w.operator || r.BaseSHA != sha {
+			t.Errorf("%s: status %q operator %q base %q, want %q %q %q", r.File, r.Status, r.Operator, r.BaseSHA, w.status, w.operator, sha)
+		}
+		for name, pair := range map[string][2][]string{
+			"killers":     {r.Killers, w.killers},
+			"unreachable": {r.UnreachableKillers, w.unreachable},
+			"beyond":      {r.BeyondMaxHopsKillers, w.beyond},
+		} {
+			if len(pair[0]) != len(pair[1]) || (len(pair[1]) > 0 && !reflect.DeepEqual(pair[0], pair[1])) {
+				t.Errorf("%s: %s = %v, want %v", r.File, name, pair[0], pair[1])
+			}
+		}
+		if r.ID == "" || r.Original == r.Mutated || r.Line < 1 {
+			t.Errorf("%s: incomplete record %+v", r.File, r)
+		}
+	}
+}
+
 func TestRunProcedureWithScriptedGo(t *testing.T) {
 	repo := sharedRepo(t)
 	sha := gitIn(t, repo, "rev-parse", "HEAD")
@@ -910,57 +993,7 @@ func TestRunProcedureWithScriptedGo(t *testing.T) {
 		t.Errorf("slot count not honored; log:\n%s", log)
 	}
 
-	if sum.BaseSHA != sha || sum.Candidates != 6 || sum.Executed != 6 || sum.BaselineSeconds <= 0 {
-		t.Errorf("header = base %q candidates %d executed %d baseline %.4fs; want %q 6 6 >0", sum.BaseSHA, sum.Candidates, sum.Executed, sum.BaselineSeconds, sha)
-	}
-	if want := map[string]int{"killed": 2, "survived": 1, "build_error": 1, "timeout": 1, "unconfirmed": 1}; !reflect.DeepEqual(sum.ByStatus, want) {
-		t.Errorf("ByStatus = %v, want %v", sum.ByStatus, want)
-	}
-	if want := map[string]int{"cmp": 3, "ret": 2, "cfg": 1}; !reflect.DeepEqual(sum.ByOperator, want) {
-		t.Errorf("ByOperator = %v, want %v", sum.ByOperator, want)
-	}
-	if sum.Usable != 2 || sum.UnreachableMutants != 1 || sum.FullyUnreachableMutants != 1 || sum.BeyondMaxHopsMutants != 1 {
-		t.Errorf("usable %d unreachable %d fully %d beyond %d; want 2 1 1 1", sum.Usable, sum.UnreachableMutants, sum.FullyUnreachableMutants, sum.BeyondMaxHopsMutants)
-	}
-
-	type want struct {
-		status                       string
-		killers, unreachable, beyond []string
-	}
-	tid := func(pkg, name string) string { return "go:" + pkg + ":" + name }
-	wants := map[string]want{
-		"calc/fix.go":        {"killed", []string{tid(pkgApp, "TestNormalize"), tid(pkgCalc, "TestFix")}, nil, []string{tid(pkgApp, "TestNormalize")}},
-		"calc/settle.go":     {"survived", nil, nil, nil},
-		"calc/check.go":      {"build_error", nil, nil, nil},
-		"calc/count.go":      {"timeout", nil, nil, nil},
-		"calc/armed.go":      {"unconfirmed", nil, nil, nil},
-		"config/limits.yaml": {"killed", []string{tid(pkgCfgcheck, "TestLimits")}, []string{tid(pkgCfgcheck, "TestLimits")}, nil},
-	}
-	if len(sum.Records) != len(wants) {
-		t.Fatalf("records = %d, want %d: %+v", len(sum.Records), len(wants), sum.Records)
-	}
-	for _, r := range sum.Records {
-		w, ok := wants[r.File]
-		if !ok {
-			t.Errorf("unexpected record for %s: %+v", r.File, r)
-			continue
-		}
-		if r.Status != w.status || r.BaseSHA != sha {
-			t.Errorf("%s: status %q base %q, want %q %q", r.File, r.Status, r.BaseSHA, w.status, sha)
-		}
-		for name, pair := range map[string][2][]string{
-			"killers":     {r.Killers, w.killers},
-			"unreachable": {r.UnreachableKillers, w.unreachable},
-			"beyond":      {r.BeyondMaxHopsKillers, w.beyond},
-		} {
-			if len(pair[0]) != len(pair[1]) || (len(pair[1]) > 0 && !reflect.DeepEqual(pair[0], pair[1])) {
-				t.Errorf("%s: %s = %v, want %v", r.File, name, pair[0], pair[1])
-			}
-		}
-		if r.ID == "" || r.Operator == "" || r.Original == r.Mutated || r.Line < 1 {
-			t.Errorf("%s: incomplete record %+v", r.File, r)
-		}
-	}
+	requireOutcome(t, sum, sha, fixtureWants())
 	requirePublished(t, opts, sum)
 
 	// The exact go command lines.
@@ -1242,90 +1275,20 @@ func TestRunCanceledDuringTheBaselineLeavesNothingBehind(t *testing.T) {
 	requireNoOutputs(t, opts)
 }
 
+// The real go toolchain over the shared fixture. Its launches dominate the cost
+// of this package's tests on this host, so one run covers every outcome that does
+// not need a hang, and every run repeats the baseline twice and the package graph
+// load. The Timeout is long: a go test that merely runs slowly under load must
+// not be mistaken for a hang.
 func TestRunEndToEnd(t *testing.T) {
-	repo := sharedRepo(t)
-	sha := gitIn(t, repo, "rev-parse", "HEAD")
-	opts := fixtureOptions(repo, t.TempDir(), []string{"calc/fix.go", "calc/settle.go", "calc/check.go", "config/limits.yaml"}, []string{"cmp", "ret", "cfg"})
-	opts.Concurrency = 4
-	opts.MaxHops = 0 // app imports calc one hop away: beyond a bound of zero
-	guard := newRunGuard(t, repo)
-	opts.Log = guard
-	sum, err := Run(context.Background(), opts)
-	if err != nil {
-		t.Fatalf("Run: %v\nlog:\n%s", err, guard.logText())
-	}
-	t.Logf("run log:\n%s", guard.logText())
-	guard.finish(t)
-	if guard.applied != 4 {
-		t.Errorf("applied %d mutants, want 4", guard.applied)
-	}
-	if log := guard.logText(); !strings.Contains(log, "executing 4 of 4 mutants on 4 slots") {
-		t.Errorf("slot count not honored; log:\n%s", log)
-	}
-
-	if sum.BaseSHA != sha || sum.Candidates != 4 || sum.Executed != 4 || sum.BaselineSeconds <= 0 {
-		t.Errorf("header = base %q candidates %d executed %d baseline %.2fs; want %q 4 4 >0", sum.BaseSHA, sum.Candidates, sum.Executed, sum.BaselineSeconds, sha)
-	}
-	if want := map[string]int{"killed": 2, "survived": 1, "build_error": 1}; !reflect.DeepEqual(sum.ByStatus, want) {
-		t.Errorf("ByStatus = %v, want %v", sum.ByStatus, want)
-	}
-	if want := map[string]int{"cmp": 2, "ret": 1, "cfg": 1}; !reflect.DeepEqual(sum.ByOperator, want) {
-		t.Errorf("ByOperator = %v, want %v", sum.ByOperator, want)
-	}
-	if sum.Usable != 2 || sum.UnreachableMutants != 1 || sum.FullyUnreachableMutants != 1 || sum.BeyondMaxHopsMutants != 1 {
-		t.Errorf("usable %d unreachable %d fully %d beyond %d; want 2 1 1 1", sum.Usable, sum.UnreachableMutants, sum.FullyUnreachableMutants, sum.BeyondMaxHopsMutants)
-	}
-
-	type want struct {
-		status                       string
-		killers, unreachable, beyond []string
-	}
-	app, calc, cfgcheck := "go:"+pkgApp+":TestNormalize", "go:"+pkgCalc+":TestFix", "go:"+pkgCfgcheck+":TestLimits"
-	wants := map[string]want{
-		// Killed by calc's own test and by app, which imports calc.
-		"calc/fix.go": {"killed", []string{app, calc}, nil, []string{app}},
-		// An equivalent mutant: no test can tell it apart.
-		"calc/settle.go": {"survived", nil, nil, nil},
-		// err is declared and no longer used.
-		"calc/check.go": {"build_error", nil, nil, nil},
-		// A configuration value: killed by a test whose package has no import path to it.
-		"config/limits.yaml": {"killed", []string{cfgcheck}, []string{cfgcheck}, nil},
-	}
-	if len(sum.Records) != len(wants) {
-		t.Fatalf("records = %d, want %d: %+v", len(sum.Records), len(wants), sum.Records)
-	}
-	for _, r := range sum.Records {
-		w, ok := wants[r.File]
-		if !ok {
-			t.Errorf("unexpected record for %s: %+v", r.File, r)
-			continue
-		}
-		if r.Status != w.status || r.BaseSHA != sha {
-			t.Errorf("%s: status %q base %q, want %q %q", r.File, r.Status, r.BaseSHA, w.status, sha)
-		}
-		for name, pair := range map[string][2][]string{
-			"killers":     {r.Killers, w.killers},
-			"unreachable": {r.UnreachableKillers, w.unreachable},
-			"beyond":      {r.BeyondMaxHopsKillers, w.beyond},
-		} {
-			if len(pair[0]) != len(pair[1]) || (len(pair[1]) > 0 && !reflect.DeepEqual(pair[0], pair[1])) {
-				t.Errorf("%s: %s = %v, want %v", r.File, name, pair[0], pair[1])
-			}
-		}
-		if r.ID == "" || r.Operator == "" || r.Original == r.Mutated || r.Line < 1 {
-			t.Errorf("%s: incomplete record %+v", r.File, r)
-		}
-	}
-	requirePublished(t, opts, sum)
-}
-
-// A killer that fails the first time and passes when run again is not a kill.
-func TestRunFlakyKillerIsUnconfirmed(t *testing.T) {
 	marker := armedMarker(t)
 	repo := sharedRepo(t)
-	opts := fixtureOptions(repo, t.TempDir(), []string{"calc/armed.go"}, []string{"ret"})
-	opts.Packages = []string{"./calc"}
-	opts.Concurrency = 3 // more slots than mutants: only one is created
+	sha := gitIn(t, repo, "rev-parse", "HEAD")
+	files := []string{"calc/fix.go", "calc/settle.go", "calc/check.go", "calc/armed.go", "config/limits.yaml"}
+	opts := fixtureOptions(repo, t.TempDir(), files, []string{"cmp", "ret", "cfg"})
+	opts.Concurrency = 4
+	opts.MaxHops = 0 // app imports calc one hop away: beyond a bound of zero
+	opts.Timeout = 15 * time.Minute
 	guard := newRunGuard(t, repo)
 	opts.Log = guard
 	sum, err := Run(context.Background(), opts)
@@ -1334,30 +1297,28 @@ func TestRunFlakyKillerIsUnconfirmed(t *testing.T) {
 	}
 	t.Logf("run log:\n%s", guard.logText())
 	guard.finish(t)
-	if log := guard.logText(); !strings.Contains(log, "executing 1 of 1 mutants on 1 slots") {
-		t.Errorf("the slot count must not exceed the mutant count; log:\n%s", log)
+	if guard.applied != 5 {
+		t.Errorf("applied %d mutants, want 5", guard.applied)
+	}
+	if log := guard.logText(); !strings.Contains(log, "executing 5 of 5 mutants on 4 slots") {
+		t.Errorf("slot count not honored; log:\n%s", log)
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Errorf("the marker was never created, so TestArmed did not fail in the first run: %v", err)
 	}
-	if len(sum.Records) != 1 {
-		t.Fatalf("records = %+v, want one", sum.Records)
-	}
-	if r := sum.Records[0]; r.Status != "unconfirmed" || len(r.Killers) != 0 {
-		t.Errorf("record = %+v, want unconfirmed with no killers", r)
-	}
-	if sum.Usable != 0 || sum.ByStatus["unconfirmed"] != 1 {
-		t.Errorf("summary = %+v, want no usable mutant and one unconfirmed", sum)
-	}
+	wants := fixtureWants()
+	delete(wants, "calc/count.go") // the hang has a run of its own
+	requireOutcome(t, sum, sha, wants)
 	// An unconfirmed kill is not a label: it never reaches the database.
 	requirePublished(t, opts, sum)
-	if stored := readStored(t, opts.DBPath); len(stored.status) != 0 || len(stored.kills) != 0 {
-		t.Errorf("database holds %+v, want nothing", stored)
-	}
 }
 
+// A mutant that never ends is a timeout, not a failure of the run, and has no
+// killers. A short Timeout makes the hang cheap: whether the test binary's own
+// timeout or the driver's deadline ends it first, the status is the same.
 func TestRunTimeoutMutant(t *testing.T) {
 	repo := sharedRepo(t)
+	sha := gitIn(t, repo, "rev-parse", "HEAD")
 	opts := fixtureOptions(repo, t.TempDir(), []string{"calc/count.go"}, []string{"cmp"})
 	opts.Packages = []string{"./calc"}
 	opts.Timeout = 20 * time.Second
@@ -1369,8 +1330,6 @@ func TestRunTimeoutMutant(t *testing.T) {
 	}
 	t.Logf("run log:\n%s", guard.logText())
 	guard.finish(t)
-	if len(sum.Records) != 1 || sum.Records[0].Status != "timeout" || len(sum.Records[0].Killers) != 0 {
-		t.Fatalf("records = %+v, want one timeout record with no killers", sum.Records)
-	}
+	requireOutcome(t, sum, sha, map[string]fixtureWant{"calc/count.go": fixtureWants()["calc/count.go"]})
 	requirePublished(t, opts, sum)
 }
