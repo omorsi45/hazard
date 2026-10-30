@@ -87,11 +87,7 @@ func NewRoot() *cobra.Command {
 	eval.Flags().String("out", ".hazard/report/", "report directory")
 	root.AddCommand(eval)
 
-	audit := leaf("audit", "Audit a selection against a full run")
-	audit.Flags().String("full-run", "", "full-run JUnit path")
-	audit.Flags().String("since-run", "", "selection ID or timestamp")
-	audit.Flags().Bool("bisect", false, "bisect suspected misses")
-	root.AddCommand(audit)
+	root.AddCommand(newAuditCommand(nativeRunners()))
 
 	root.AddCommand(newExplainCommand(engine.Select))
 

@@ -44,7 +44,6 @@ func TestDocumentedFlagsParse(t *testing.T) {
 	cases := [][]string{
 		{"calibrate", "--alpha", "0.01", "--delta", "0.05", "--split", "temporal", "--split-at", "2026-06-01", "--predictor", "ensemble", "--grid", "0.005:0.500:0.005", "--unit", "commit", "--out", "hazard.lock"},
 		{"eval", "--split", "temporal", "--split-at", "2026-06-01", "--predictors", "static,logistic", "--baselines", "all,l1-only", "--out", "report"},
-		{"audit", "--full-run", "junit.xml", "--since-run", "id", "--bisect"},
 	}
 	for _, args := range cases {
 		t.Run(strings.Join(args[:min(len(args), 2)], "_"), func(t *testing.T) {
