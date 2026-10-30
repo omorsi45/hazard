@@ -51,7 +51,9 @@ func NewReplay(ctx context.Context, repoDir, baseSHA string) (r *Replay, err err
 		}
 	}()
 	dir := filepath.Join(root, "clone")
-	if _, err := runGit(ctx, root, nil, nil, "clone", "--shared", "--quiet", "--no-checkout", "--", repoDir, dir); err != nil {
+	// No line-ending conversion: the index records the hash of the files of a
+	// checkout and the engine compares it with the blob at the head.
+	if _, err := runGit(ctx, root, nil, nil, "clone", "--shared", "--quiet", "--no-checkout", "-c", "core.autocrlf=false", "--", repoDir, dir); err != nil {
 		return nil, fmt.Errorf("events: clone %s: %w", repoDir, err)
 	}
 	out, err := runGit(ctx, dir, nil, nil, "rev-parse", "--verify", "--quiet", baseSHA+"^{commit}")

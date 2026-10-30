@@ -306,3 +306,28 @@ func TestReplaySelectMatchesChangeExtract(t *testing.T) {
 		t.Errorf("hunks = %+v, want one hunk replacing one line", h)
 	}
 }
+
+// TestReplayChecksOutTheBlobsByteForByte: the index records the hash of the
+// files of a checkout and the engine compares it with the blob at the head, so
+// a checkout that converts line endings would make every index stale.
+func TestReplayChecksOutTheBlobsByteForByte(t *testing.T) {
+	dir, base := newReplayRepo(t)
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte("[core]\n\tautocrlf = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	r := openReplay(t, dir, base)
+	for _, rel := range []string{"sub/b.go", "a.txt", "go.mod"} {
+		got, err := os.ReadFile(filepath.Join(r.Dir(), filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(got), "\r") {
+			t.Errorf("scratch %s has CRLF line endings: %q", rel, got)
+		}
+		if want := gitIn(t, dir, "show", base+":"+rel); strings.TrimRight(string(got), "\n") != want {
+			t.Errorf("scratch %s = %q, want the blob %q", rel, got, want)
+		}
+	}
+}
