@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,6 +80,10 @@ type Summary struct {
 	BeyondMaxHopsMutants int      `json:"beyond_max_hops_mutants"`
 	BaselineSeconds      float64  `json:"baseline_seconds"`
 	Records              []Record `json:"records,omitempty"`
+	// BaselineMS is the median of the two baseline runs' elapsed time of each
+	// top-level test, in whole milliseconds rounded half up, keyed by the same
+	// "go:<import path>:<Test>" IDs as Record.Killers.
+	BaselineMS map[string]int64 `json:"baseline_ms"`
 }
 
 // goRunner runs the go command with args in dir. A nonzero exit is reported in
@@ -154,7 +160,7 @@ func run(ctx context.Context, opts Options, tl tools) (sum Summary, err error) {
 		d.base[m.File] = src
 	}
 	d.slots = []string{slot0}
-	baselineSeconds, err := d.baseline(ctx, slot0)
+	baselineSeconds, baselineMS, err := d.baseline(ctx, slot0)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -190,8 +196,12 @@ func run(ctx context.Context, opts Options, tl tools) (sum Summary, err error) {
 		return Summary{}, err
 	}
 	sum = summarize(sha, len(candidates), baselineSeconds, recs)
+	sum.BaselineMS = baselineMS
 	if partial != nil {
 		if err := partial.Commit(sum.Records); err != nil {
+			return Summary{}, err
+		}
+		if err := writeBaseline(opts.Out, sha, baselineMS); err != nil {
 			return Summary{}, err
 		}
 	}
@@ -411,29 +421,111 @@ func (d *driver) goArgs(sub string, pkgs []string, flags ...string) []string {
 }
 
 // baseline runs the whole suite twice in slot and requires both runs to pass.
-// It returns the wall time of the second run.
-func (d *driver) baseline(ctx context.Context, slot string) (float64, error) {
+// It returns the wall time of the second run and the median elapsed
+// milliseconds of each top-level test across the two runs.
+func (d *driver) baseline(ctx context.Context, slot string) (float64, map[string]int64, error) {
 	var seconds float64
+	var elapsed [2]map[string]float64
 	for run := 1; run <= 2; run++ {
 		d.logf("baseline run %d of 2 starting", run)
 		start := time.Now()
 		res, err := d.tools.goCmd(ctx, slot, d.goArgs("test", d.opts.Packages, "-count=1")...)
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		seconds = time.Since(start).Seconds()
 		parsed, perr := parseGoTestJSON(bytes.NewReader(res.Stdout))
 		switch {
 		case perr != nil:
-			return 0, fmt.Errorf("mutate: baseline is not green (run %d): %w", run, perr)
+			return 0, nil, fmt.Errorf("mutate: baseline is not green (run %d): %w", run, perr)
 		case res.Exit != 0 || len(parsed.Failed) > 0 || len(parsed.PackagesFailedWithoutTest) > 0 || len(parsed.BuildFailed) > 0 || parsed.TimedOut:
-			return 0, fmt.Errorf("mutate: baseline is not green (run %d): exit %d, failing tests %v, failing packages %v, build failures %v, timed out %t: %s",
+			return 0, nil, fmt.Errorf("mutate: baseline is not green (run %d): exit %d, failing tests %v, failing packages %v, build failures %v, timed out %t: %s",
 				run, res.Exit, parsed.Failed, parsed.PackagesFailedWithoutTest, parsed.BuildFailed, parsed.TimedOut, stderrTail(res.Stderr))
+		}
+		if elapsed[run-1], err = baselineElapsed(res.Stdout); err != nil {
+			return 0, nil, fmt.Errorf("%w (run %d)", err, run)
 		}
 		d.logf("baseline run %d of 2 passed in %.1fs (%d tests timed)", run, seconds, len(parsed.Durations))
 	}
-	return seconds, nil
+	ms, err := medianMS(elapsed[0], elapsed[1])
+	if err != nil {
+		return 0, nil, err
+	}
+	return seconds, ms, nil
 }
+
+// elapsedEvent is the part of a test2json event that carries a test's elapsed
+// time. Elapsed is a pointer so that an absent field is not read as 0: go test
+// reports 0.00 for a fast test, which is a measurement.
+type elapsedEvent struct {
+	Action  string
+	Package string
+	Test    string
+	Elapsed *float64
+}
+
+// baselineElapsed reads the elapsed seconds of every top-level test that
+// passed in a `go test -json` stream, keyed by test ID. Subtests have no key of
+// their own. A passing test whose event carries no elapsed field, or a negative
+// one, is an error naming the test: a duration is never invented.
+func baselineElapsed(stdout []byte) (map[string]float64, error) {
+	elapsed := map[string]float64{}
+	for _, line := range bytes.Split(stdout, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("{")) {
+			continue
+		}
+		var ev elapsedEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			return nil, fmt.Errorf("mutate: malformed go test -json event %q: %w", line, err)
+		}
+		if ev.Action != "pass" || ev.Package == "" || ev.Test == "" || strings.Contains(ev.Test, "/") {
+			continue
+		}
+		id := testID(ev.Package, ev.Test)
+		switch {
+		case ev.Elapsed == nil:
+			return nil, fmt.Errorf("mutate: baseline test %s has no elapsed time", id)
+		case *ev.Elapsed < 0:
+			return nil, fmt.Errorf("mutate: baseline test %s has a negative elapsed time (%g)", id, *ev.Elapsed)
+		}
+		elapsed[id] = *ev.Elapsed
+	}
+	return elapsed, nil
+}
+
+// medianMS merges the elapsed seconds of the two baseline runs into the
+// median of each test in whole milliseconds, rounded half up. The median of
+// two values is their mean. A test that only one run reported is an error naming
+// the first such test by ID: the baseline must be the same suite twice.
+func medianMS(first, second map[string]float64) (map[string]int64, error) {
+	var onlyOne []string
+	for id := range first {
+		if _, ok := second[id]; !ok {
+			onlyOne = append(onlyOne, id)
+		}
+	}
+	for id := range second {
+		if _, ok := first[id]; !ok {
+			onlyOne = append(onlyOne, id)
+		}
+	}
+	if len(onlyOne) > 0 {
+		return nil, fmt.Errorf("mutate: baseline runs disagree on the test set: %s", slices.Min(onlyOne))
+	}
+	ms := make(map[string]int64, len(first))
+	for id, a := range first {
+		// Whole microseconds are finer than the decimals go test prints, and make
+		// the sum and the half-up rounding exact: (0.01+0.011)*500 comes out just
+		// under 10.5 in floating point.
+		sum := microseconds(a) + microseconds(second[id])
+		ms[id] = (sum + 1000) / 2000
+	}
+	return ms, nil
+}
+
+// microseconds converts non-negative seconds to the nearest whole microsecond.
+func microseconds(seconds float64) int64 { return int64(math.Round(seconds * 1e6)) }
 
 // classifyRun names the outcome of a mutant's first test run. A failing test
 // is only a candidate kill: it is confirmed by a rerun. A package that failed

@@ -154,6 +154,67 @@ func TestJSONLWriterCloseKeepsPartialEvidence(t *testing.T) {
 	}
 }
 
+func TestWriteBaselinePublishesSortedKeysNextToTheJSONL(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "mutants.jsonl")
+	if got, want := baselinePath(out), out+".baseline.json"; got != want {
+		t.Fatalf("baselinePath = %q, want %q", got, want)
+	}
+	tests := map[string]int64{"go:m/c:TestC": 2000, "go:m/a:TestA": 15, "go:m/b:TestB": 0}
+	if err := writeBaseline(out, "sha1", tests); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(out + ".baseline.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"base_sha":"sha1","tests":{"go:m/a:TestA":15,"go:m/b:TestB":0,"go:m/c:TestC":2000}}` + "\n"
+	if string(got) != want {
+		t.Errorf("baseline file = %q\nwant            %q", got, want)
+	}
+	if _, err := os.Stat(out + ".baseline.json.tmp"); err == nil {
+		t.Errorf("the temporary file survives a published baseline")
+	}
+	// A rerun replaces the file, and a suite without tests is {}, never null.
+	if err := writeBaseline(out, "sha2", nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(out + ".baseline.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"base_sha":"sha2","tests":{}}` + "\n"; string(got) != want {
+		t.Errorf("baseline file after a rerun = %q, want %q", got, want)
+	}
+}
+
+// A baseline that cannot be written completely leaves the previous file whole
+// and reports the failure.
+func TestWriteBaselineFailureKeepsThePreviousFile(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "mutants.jsonl")
+	if err := writeBaseline(out, "old", map[string]int64{"go:m/a:TestA": 1}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(out + ".baseline.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the temporary file belongs makes the write fail.
+	if err := os.Mkdir(out+".baseline.json.tmp", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeBaseline(out, "new", map[string]int64{"go:m/a:TestA": 2}); err == nil {
+		t.Fatalf("writeBaseline succeeded although the temporary file cannot be created")
+	}
+	after, err := os.ReadFile(out + ".baseline.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("a failed write changed the baseline file to %q, want %q", after, before)
+	}
+}
+
 func dbRows(t *testing.T, path, query string) [][2]string {
 	t.Helper()
 	s, err := store.Open(path)

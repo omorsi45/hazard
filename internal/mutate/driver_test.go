@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -580,7 +582,7 @@ func fixtureOptions(repo, outDir string, files, ops []string) Options {
 
 func requireNoOutputs(t *testing.T, opts Options) {
 	t.Helper()
-	for _, p := range []string{opts.Out, opts.Out + ".partial", opts.DBPath} {
+	for _, p := range []string{opts.Out, opts.Out + ".partial", opts.Out + ".baseline.json", opts.Out + ".baseline.json.tmp", opts.DBPath} {
 		if _, err := os.Stat(p); err == nil {
 			t.Errorf("%s exists after a refused run", p)
 		}
@@ -635,9 +637,10 @@ func readStored(t *testing.T, dbPath string) storedMutants {
 	return got
 }
 
-// requirePublished asserts that the JSONL file and the database hold exactly
-// what the summary reports: every record, and the stored statuses and kills of
-// all but the unconfirmed mutants.
+// requirePublished asserts that the JSONL file, the baseline durations file and
+// the database hold exactly what the summary reports: every record, the
+// per-test baseline, and the stored statuses and kills of all but the
+// unconfirmed mutants.
 func requirePublished(t *testing.T, opts Options, sum Summary) {
 	t.Helper()
 	if got := readJSONL(t, opts.Out); !reflect.DeepEqual(got, sum.Records) {
@@ -646,6 +649,7 @@ func requirePublished(t *testing.T, opts Options, sum Summary) {
 	if _, err := os.Stat(opts.Out + ".partial"); err == nil {
 		t.Errorf("the partial file survives a completed run")
 	}
+	requireBaselineFile(t, opts, sum)
 	stored := readStored(t, opts.DBPath)
 	wantStatus, wantKills := map[string]string{}, map[string][]string{}
 	for _, r := range sum.Records {
@@ -659,6 +663,32 @@ func requirePublished(t *testing.T, opts Options, sum Summary) {
 	}
 	if !reflect.DeepEqual(stored.status, wantStatus) || !reflect.DeepEqual(stored.kills, wantKills) {
 		t.Errorf("database differs from the summary:\n status %v want %v\n kills %v want %v", stored.status, wantStatus, stored.kills, wantKills)
+	}
+}
+
+// requireBaselineFile asserts that <Out>.baseline.json holds the base SHA and
+// exactly the summary's per-test baseline, which must not be empty: every
+// fixture suite has tests.
+func requireBaselineFile(t *testing.T, opts Options, sum Summary) {
+	t.Helper()
+	raw, err := os.ReadFile(opts.Out + ".baseline.json")
+	if err != nil {
+		t.Errorf("the baseline durations file: %v", err)
+		return
+	}
+	var got struct {
+		BaseSHA string           `json:"base_sha"`
+		Tests   map[string]int64 `json:"tests"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Errorf("the baseline durations file is not JSON: %q: %v", raw, err)
+		return
+	}
+	if got.BaseSHA != sum.BaseSHA || len(sum.BaselineMS) == 0 || !reflect.DeepEqual(got.Tests, sum.BaselineMS) {
+		t.Errorf("baseline file = base %q tests %v; want base %q tests %v (non-empty)", got.BaseSHA, got.Tests, sum.BaseSHA, sum.BaselineMS)
+	}
+	if _, err := os.Stat(opts.Out + ".baseline.json.tmp"); err == nil {
+		t.Errorf("the temporary baseline file survives a completed run")
 	}
 }
 
@@ -716,6 +746,147 @@ func TestRestoreFileWritesTheBaseAndVerifiesIt(t *testing.T) {
 	}
 	if err := restoreFile(blocked, base); err == nil {
 		t.Errorf("restoring onto a directory must fail")
+	}
+}
+
+// ---- baseline durations ----
+
+func TestBaselineElapsedReadsTheTopLevelPassEvents(t *testing.T) {
+	stdout := jsonLines(
+		`go: downloading something`,
+		`{"Action":"start","Package":"m/calc"}`,
+		`{"Action":"run","Package":"m/calc","Test":"TestAdd"}`,
+		`{"Action":"output","Package":"m/calc","Test":"TestAdd","Output":"=== RUN   TestAdd\n"}`,
+		`{"Action":"pass","Package":"m/calc","Test":"TestAdd/neg","Elapsed":9}`,
+		`{"Action":"pass","Package":"m/calc","Test":"TestAdd","Elapsed":0.25}`,
+		`{"Action":"pass","Package":"m/calc","Test":"TestFast","Elapsed":0}`,
+		`{"Action":"skip","Package":"m/calc","Test":"TestSkipped","Elapsed":0.5}`,
+		`{"Action":"pass","Package":"m/calc","Elapsed":3}`,
+		`{"Action":"pass","Package":"m/app","Test":"TestAdd","Elapsed":1.5}`,
+	)
+	got, err := baselineElapsed([]byte(stdout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]float64{
+		"go:m/calc:TestAdd":  0.25,
+		"go:m/calc:TestFast": 0, // go test reports 0.00 for a fast test: a measurement, not a gap
+		"go:m/app:TestAdd":   1.5,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("elapsed = %v, want %v", got, want)
+	}
+}
+
+func TestBaselineElapsedNeverInventsADuration(t *testing.T) {
+	tests := []struct {
+		name, stdout, wantInErr string
+	}{
+		{"a pass event without an elapsed field", jsonLines(
+			`{"Action":"pass","Package":"m/calc","Test":"TestAdd","Elapsed":0.1}`,
+			`{"Action":"pass","Package":"m/calc","Test":"TestSub"}`,
+		), "go:m/calc:TestSub"},
+		{"a negative elapsed time", jsonLines(
+			`{"Action":"pass","Package":"m/calc","Test":"TestAdd","Elapsed":-0.1}`,
+		), "go:m/calc:TestAdd"},
+		{"an event that is not JSON", jsonLines(
+			`{"Action":"pass","Package":"m/calc","Test":"TestAdd","Elap`,
+		), "malformed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := baselineElapsed([]byte(tt.stdout))
+			if err == nil || !strings.Contains(err.Error(), tt.wantInErr) {
+				t.Fatalf("baselineElapsed = %v, %v; want an error containing %q", got, err, tt.wantInErr)
+			}
+		})
+	}
+	// A subtest has no key of its own, so a subtest without a time is no gap.
+	if _, err := baselineElapsed([]byte(jsonLines(`{"Action":"pass","Package":"m/calc","Test":"TestAdd/neg"}`))); err != nil {
+		t.Errorf("a subtest without an elapsed field: %v, want none", err)
+	}
+}
+
+func TestMedianMSIsTheMeanOfTheTwoRunsRoundedHalfUp(t *testing.T) {
+	tests := []struct {
+		name          string
+		first, second float64
+		want          int64
+	}{
+		{"two equal runs", 0.1, 0.1, 100},
+		{"an even sum of milliseconds", 0.010, 0.020, 15},
+		{"an odd sum rounds up", 0.010, 0.013, 12},
+		{"1.5 rounds to 2", 0.001, 0.002, 2},
+		{"2.5 rounds to 3, not to the even 2", 0.002, 0.003, 3},
+		{"half a millisecond rounds to 1", 0.0005, 0.0005, 1},
+		{"a quarter of a millisecond rounds to 0", 0.0005, 0, 0},
+		{"zero is a measurement", 0, 0, 0},
+		{"a long test", 12.5, 12.75, 12625},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := medianMS(map[string]float64{"go:m/a:TestA": tt.first}, map[string]float64{"go:m/a:TestA": tt.second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := map[string]int64{"go:m/a:TestA": tt.want}; !reflect.DeepEqual(got, want) {
+				t.Errorf("medianMS(%v, %v) = %v, want %v", tt.first, tt.second, got, want)
+			}
+		})
+	}
+}
+
+// Elapsed times arrive as decimal text, so a mean of exactly k+0.5 ms must round
+// to k+1 whatever the binary form of the two inputs.
+func TestMedianMSRoundsEveryHalfMillisecondUp(t *testing.T) {
+	seconds := func(micros int) float64 {
+		v, err := strconv.ParseFloat(fmt.Sprintf("%d.%06d", micros/1_000_000, micros%1_000_000), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	for k := 0; k < 20000; k++ {
+		same := seconds(k*1000 + 500)
+		pair := [2]float64{seconds(k * 1000), seconds((k + 1) * 1000)}
+		for _, runs := range [][2]float64{{same, same}, pair} {
+			got, err := medianMS(map[string]float64{"go:m/a:TestA": runs[0]}, map[string]float64{"go:m/a:TestA": runs[1]})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got["go:m/a:TestA"] != int64(k+1) {
+				t.Fatalf("medianMS(%v, %v) = %d, want %d", runs[0], runs[1], got["go:m/a:TestA"], k+1)
+			}
+		}
+	}
+}
+
+// The baseline must be the same suite twice: a test seen in one run only would
+// have a duration that is not a median of anything.
+func TestMedianMSRefusesTestsOfOnlyOneRun(t *testing.T) {
+	both := map[string]float64{"go:m/a:TestA": 0.1}
+	extra := map[string]float64{"go:m/a:TestA": 0.1, "go:m/b:TestB": 0.2, "go:m/a:TestAA": 0.3}
+	for name, runs := range map[string][2]map[string]float64{
+		"only in the first run":  {extra, both},
+		"only in the second run": {both, extra},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := medianMS(runs[0], runs[1])
+			// Several tests differ: the error names the first by ID, so it is stable.
+			if err == nil || !strings.Contains(err.Error(), "baseline runs disagree on the test set: go:m/a:TestAA") {
+				t.Fatalf("medianMS = %v, %v; want the disagreement on go:m/a:TestAA", got, err)
+			}
+			if got != nil {
+				t.Errorf("medianMS returned %v with its error", got)
+			}
+		})
+	}
+}
+
+func TestMedianMSOfTwoEmptyRunsIsAnEmptyMap(t *testing.T) {
+	got, err := medianMS(map[string]float64{}, map[string]float64{})
+	if err != nil || got == nil || len(got) != 0 {
+		t.Errorf("medianMS of nothing = %#v, %v; want an empty, non-nil map", got, err)
 	}
 }
 
@@ -995,6 +1166,10 @@ func TestRunProcedureWithScriptedGo(t *testing.T) {
 
 	requireOutcome(t, sum, sha, fixtureWants())
 	requirePublished(t, opts, sum)
+	// Both scripted baseline runs report TestFix at 0.1s: 100ms.
+	if want := map[string]int64{"go:" + pkgCalc + ":TestFix": 100}; !reflect.DeepEqual(sum.BaselineMS, want) {
+		t.Errorf("BaselineMS = %v, want %v", sum.BaselineMS, want)
+	}
 
 	// The exact go command lines.
 	pkgs := []string{"./calc", "./app", "./cfgcheck"}
@@ -1095,6 +1270,9 @@ func TestRunStopsWhenAMutantCannotBeRestored(t *testing.T) {
 	if _, err := os.Stat(opts.Out); err == nil {
 		t.Errorf("the final output exists after an aborted run")
 	}
+	if _, err := os.Stat(opts.Out + ".baseline.json"); err == nil {
+		t.Errorf("the baseline durations file exists after an aborted run")
+	}
 	if _, err := os.Stat(opts.DBPath); err == nil {
 		t.Errorf("the database exists after an aborted run")
 	}
@@ -1185,6 +1363,136 @@ func TestRunRefusesEveryKindOfRedBaseline(t *testing.T) {
 	}
 }
 
+// The baseline durations are, per top-level test, the median of the two
+// baseline runs in milliseconds, rounded half up. Subtests have no entry, a
+// test that go test timed at 0 does, and the file next to the JSONL holds the
+// same map sorted by key.
+func TestRunRecordsTheMedianBaselineDurations(t *testing.T) {
+	repo := sharedRepo(t)
+	sha := gitIn(t, repo, "rev-parse", "HEAD")
+	opts := fixtureOptions(repo, t.TempDir(), []string{"calc/settle.go"}, []string{"cmp"})
+	guard := newRunGuard(t, repo)
+	opts.Log = guard
+	pass := func(pkg, test string, elapsed float64) string {
+		return fmt.Sprintf(`{"Action":"pass","Package":%q,"Test":%q,"Elapsed":%v}`, pkg, test, elapsed)
+	}
+	baselineRuns := []string{
+		jsonLines(
+			pass(pkgCalc, "TestFix", 0.010),
+			pass(pkgCalc, "TestFix/sub", 7),
+			pass(pkgCalc, "TestFast", 0),
+			pass(pkgApp, "TestNormalize", 2.5),
+			`{"Action":"pass","Package":"`+pkgCalc+`","Elapsed":3}`,
+		),
+		jsonLines(
+			pass(pkgApp, "TestNormalize", 2.75),
+			pass(pkgCalc, "TestFast", 0),
+			pass(pkgCalc, "TestFix/sub", 8),
+			pass(pkgCalc, "TestFix", 0.013),
+			`{"Action":"pass","Package":"`+pkgCalc+`","Elapsed":4}`,
+		),
+	}
+	baselines := 0
+	fake := newFakeGo(t, func(c fakeCall) (cmdResult, error) {
+		if c.Kind == "baseline" {
+			baselines++
+			return cmdResult{Stdout: []byte(baselineRuns[baselines-1])}, nil
+		}
+		return passRun(), nil
+	})
+	sum, err := run(context.Background(), opts, fake.tools())
+	if err != nil {
+		t.Fatalf("run: %v\nlog:\n%s", err, guard.logText())
+	}
+	guard.finish(t)
+	want := map[string]int64{
+		"go:" + pkgApp + ":TestNormalize": 2625, // (2500 + 2750) / 2
+		"go:" + pkgCalc + ":TestFast":     0,
+		"go:" + pkgCalc + ":TestFix":      12, // (10 + 13) / 2 = 11.5
+	}
+	if !reflect.DeepEqual(sum.BaselineMS, want) {
+		t.Errorf("BaselineMS = %v, want %v", sum.BaselineMS, want)
+	}
+	requirePublished(t, opts, sum)
+	raw, err := os.ReadFile(opts.Out + ".baseline.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFile := fmt.Sprintf(`{"base_sha":%q,"tests":{%q:2625,%q:0,%q:12}}`+"\n", sha,
+		"go:"+pkgApp+":TestNormalize", "go:"+pkgCalc+":TestFast", "go:"+pkgCalc+":TestFix")
+	if string(raw) != wantFile {
+		t.Errorf("baseline file = %q\nwant            %q", raw, wantFile)
+	}
+}
+
+// The baseline must be the same suite twice: a test that only one run reported
+// has no median, so the run stops before any mutant is applied.
+func TestRunRefusesBaselinesThatDisagreeOnTheTestSet(t *testing.T) {
+	repo := sharedRepo(t)
+	opts := fixtureOptions(repo, t.TempDir(), []string{"calc/fix.go"}, []string{"cmp"})
+	guard := newRunGuard(t, repo)
+	opts.Log = guard
+	baselines := 0
+	fake := newFakeGo(t, func(c fakeCall) (cmdResult, error) {
+		if c.Kind == "baseline" {
+			baselines++
+			if baselines == 2 {
+				return cmdResult{Stdout: []byte(jsonLines(
+					`{"Action":"pass","Package":"` + pkgCalc + `","Test":"TestFix","Elapsed":0.1}`,
+				))}, nil
+			}
+			return cmdResult{Stdout: []byte(jsonLines(
+				`{"Action":"pass","Package":"`+pkgCalc+`","Test":"TestFix","Elapsed":0.1}`,
+				`{"Action":"pass","Package":"`+pkgCalc+`","Test":"TestOnce","Elapsed":0.1}`,
+			))}, nil
+		}
+		return passRun(), nil
+	})
+	_, err := run(context.Background(), opts, fake.tools())
+	want := "baseline runs disagree on the test set: go:" + pkgCalc + ":TestOnce"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("run error = %v, want %q", err, want)
+	}
+	if guard.applied != 0 || len(fake.all()) != 2 {
+		t.Errorf("applied %d mutants and %d go calls, want none and the two baseline runs", guard.applied, len(fake.all()))
+	}
+	requireNoOutputs(t, opts)
+	guard.finish(t)
+}
+
+// A duration is never invented: a test that passed without an elapsed time in
+// either run stops the run, and the error names the test.
+func TestRunRefusesABaselineTestWithoutAnElapsedTime(t *testing.T) {
+	for _, bad := range []int{1, 2} {
+		t.Run(fmt.Sprintf("run %d", bad), func(t *testing.T) {
+			repo := sharedRepo(t)
+			opts := fixtureOptions(repo, t.TempDir(), []string{"calc/fix.go"}, []string{"cmp"})
+			guard := newRunGuard(t, repo)
+			opts.Log = guard
+			baselines := 0
+			fake := newFakeGo(t, func(c fakeCall) (cmdResult, error) {
+				if c.Kind != "baseline" {
+					return passRun(), nil
+				}
+				baselines++
+				if baselines == bad {
+					return cmdResult{Stdout: []byte(jsonLines(`{"Action":"pass","Package":"` + pkgCalc + `","Test":"TestFix"}`))}, nil
+				}
+				return passRun(), nil
+			})
+			_, err := run(context.Background(), opts, fake.tools())
+			if err == nil || !strings.Contains(err.Error(), "go:"+pkgCalc+":TestFix") || !strings.Contains(err.Error(), fmt.Sprintf("run %d", bad)) {
+				t.Fatalf("run error = %v, want one naming go:%s:TestFix and run %d", err, pkgCalc, bad)
+			}
+			if guard.applied != 0 {
+				t.Errorf("applied %d mutants after a baseline without durations", guard.applied)
+			}
+			requireNoOutputs(t, opts)
+			guard.finish(t)
+		})
+	}
+}
+
 // Cancelling in the middle of the second mutant stops the run with the
 // context's error, leaves the repository untouched, keeps the first mutant's
 // record in the partial file as evidence, publishes nothing, and removes the
@@ -1216,6 +1524,9 @@ func TestRunCanceledInTheSecondMutantKeepsTheFirstAsEvidence(t *testing.T) {
 	}
 	if _, err := os.Stat(opts.Out); err == nil {
 		t.Errorf("the final output exists after an interrupted run")
+	}
+	if _, err := os.Stat(opts.Out + ".baseline.json"); err == nil {
+		t.Errorf("the baseline durations file exists after an interrupted run")
 	}
 	if _, err := os.Stat(opts.DBPath); err == nil {
 		t.Errorf("the database exists after an interrupted run")
