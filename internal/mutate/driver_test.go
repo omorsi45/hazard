@@ -1562,8 +1562,9 @@ func TestRunRefusesRedBaseline(t *testing.T) {
 
 // blockTestSource is the test file that holds a baseline run. TestBlock records
 // that it started in the first path, then waits for as long as the second path
-// exists. The wait is bounded, so a driver that fails to stop the go command
-// ends the run with a red baseline instead of hanging the package.
+// exists. The wait is bounded: when it runs out, TestBlock records that in the
+// third path and fails, so a driver that fails to stop the go command ends the
+// run with a red baseline and a trace instead of hanging the package.
 const blockTestSource = `package calc
 
 import (
@@ -1573,13 +1574,16 @@ import (
 )
 
 func TestBlock(t *testing.T) {
-	if err := os.WriteFile(%q, []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(%[1]q, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	for end := time.Now().Add(time.Minute); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
-		if _, err := os.Stat(%q); err != nil {
+		if _, err := os.Stat(%[2]q); err != nil {
 			return
 		}
+	}
+	if err := os.WriteFile(%[3]q, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	t.Fatal("TestBlock was never released")
 }
@@ -1612,12 +1616,12 @@ func waitForFile(stop <-chan struct{}, path string, limit time.Duration) bool {
 // once that test has reported that it started, on a host of any speed.
 func TestRunCanceledDuringTheBaselineLeavesNothingBehind(t *testing.T) {
 	ctl := t.TempDir()
-	started, hold := filepath.Join(ctl, "started"), filepath.Join(ctl, "hold")
+	started, hold, timedOut := filepath.Join(ctl, "started"), filepath.Join(ctl, "hold"), filepath.Join(ctl, "timedout")
 	if err := os.WriteFile(hold, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	files := calcFixture("", "fix")
-	files["calc/block_test.go"] = fmt.Sprintf(blockTestSource, started, hold)
+	files["calc/block_test.go"] = fmt.Sprintf(blockTestSource, started, hold, timedOut)
 	repo := newRepo(t, files)
 	opts := fixtureOptions(repo, t.TempDir(), []string{"calc/fix.go"}, []string{"cmp"})
 	opts.Packages = []string{"./calc"}
@@ -1640,6 +1644,9 @@ func TestRunCanceledDuringTheBaselineLeavesNothingBehind(t *testing.T) {
 	}
 	if !<-reached {
 		t.Error("the first baseline run never reached TestBlock, so nothing was canceled while it ran")
+	}
+	if _, statErr := os.Stat(timedOut); statErr == nil {
+		t.Error("TestBlock waited out its full minute: the cancel did not end the go command")
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run error = %v, want context.Canceled", err)
