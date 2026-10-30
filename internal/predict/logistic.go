@@ -23,16 +23,15 @@ type Example struct {
 // CIWeight is the up-weight callers give CI-label examples through
 // Example.Weight; FitLogistic only validates and records it.
 type LogisticOptions struct {
-	L2           float64 `json:"l2"`
-	CIWeight     float64 `json:"ci_weight"`
-	MaxIter      int     `json:"max_iter"`
-	Tol          float64 `json:"tol"`
-	LearningRate float64 `json:"learning_rate"`
+	L2       float64 `json:"l2"`
+	CIWeight float64 `json:"ci_weight"`
+	MaxIter  int     `json:"max_iter"`
+	Tol      float64 `json:"tol"`
 }
 
 // DefaultLogisticOptions returns the documented defaults.
 func DefaultLogisticOptions() LogisticOptions {
-	return LogisticOptions{L2: 1, CIWeight: 10, MaxIter: 5000, Tol: 1e-9, LearningRate: 0.1}
+	return LogisticOptions{L2: 1, CIWeight: 10, MaxIter: 5000, Tol: 1e-9}
 }
 
 func (o LogisticOptions) validate() error {
@@ -45,8 +44,6 @@ func (o LogisticOptions) validate() error {
 		return fmt.Errorf("option MaxIter must be positive, got %d", o.MaxIter)
 	case !isFinite(o.Tol) || o.Tol <= 0:
 		return fmt.Errorf("option Tol must be finite and positive, got %v", o.Tol)
-	case !isFinite(o.LearningRate) || o.LearningRate <= 0:
-		return fmt.Errorf("option LearningRate must be finite and positive, got %v", o.LearningRate)
 	}
 	return nil
 }
@@ -54,8 +51,8 @@ func (o LogisticOptions) validate() error {
 // LogisticModel is a standardized logistic regression with Platt scaling.
 // The probability of a feature vector f is
 // sigmoid(PlattA*z + PlattB) with z = Bias + sum_j Weights[j]*(f[j]-Means[j])/Scales[j].
-// Iterations counts the coefficient descent; Converged is true only when both
-// the coefficient descent and the Platt descent met the tolerance.
+// Iterations counts the Newton steps of the coefficient fit; Converged is true
+// only when both the coefficient fit and the Platt fit met the tolerance.
 type LogisticModel struct {
 	FeatureVersion string    `json:"feature_version"`
 	Means          []float64 `json:"means"`
@@ -69,10 +66,11 @@ type LogisticModel struct {
 }
 
 // logisticProblem is a weighted logistic objective over standardized rows:
-// the weighted mean log loss plus l2/2*||w||^2/n, the bias unpenalized.
+// the weighted mean log loss against the targets y (each in [0, 1]) plus
+// l2/2*||w||^2/n, the bias unpenalized.
 type logisticProblem struct {
 	x  [][]float64
-	y  []bool
+	y  []float64
 	w  []float64
 	l2 float64
 }
@@ -82,6 +80,48 @@ func exampleLabels(ex []Example) []bool {
 	out := make([]bool, len(ex))
 	for i, e := range ex {
 		out[i] = e.Label
+	}
+	return out
+}
+
+// labelTargets maps labels to the hard targets 1 and 0.
+func labelTargets(labels []bool) []float64 {
+	out := make([]float64, len(labels))
+	for i, l := range labels {
+		if l {
+			out[i] = 1
+		}
+	}
+	return out
+}
+
+// plattCounts returns the weighted number of positive and negative labels.
+func plattCounts(labels []bool, w []float64) (pos, neg float64) {
+	for i, l := range labels {
+		if l {
+			pos += w[i]
+		} else {
+			neg += w[i]
+		}
+	}
+	return pos, neg
+}
+
+// plattTargets returns the regularized targets of Platt scaling (Platt 1999;
+// Lin, Lin and Weng 2007): (N+ + 1)/(N+ + 2) for a positive and 1/(N- + 2)
+// for a negative, with N+ and N- the weighted class counts. Unlike the hard
+// 0/1 targets they keep the optimum finite when the scale set is separated
+// by the logit, which happens whenever it holds few positives.
+func plattTargets(labels []bool, w []float64) []float64 {
+	pos, neg := plattCounts(labels, w)
+	hi, lo := (pos+1)/(pos+2), 1/(neg+2)
+	out := make([]float64, len(labels))
+	for i, l := range labels {
+		if l {
+			out[i] = hi
+		} else {
+			out[i] = lo
+		}
 	}
 	return out
 }
@@ -189,15 +229,172 @@ func standardize(ex []Example) (means, scales []float64, x [][]float64, err erro
 	return means, scales, x, nil
 }
 
-// descend minimizes p by batch gradient descent with a fixed learning rate
-// from (w0, b0). It stops when the largest absolute gradient component falls
-// below opts.Tol (converged true) or after opts.MaxIter updates (converged
-// false, the last point still returned). A gradient or update that is not
-// finite is an error.
+// logisticPoint is a logisticProblem evaluated at theta, the weights followed
+// by the bias.
+type logisticPoint struct {
+	theta []float64
+	loss  float64   // the objective
+	grad  []float64 // its gradient, in the order of theta
+	curv  []float64 // sigmoid'(z) of each row
+}
+
+// softplus is log(1+exp(z)), stable for large |z|. NaN stays NaN.
+func softplus(z float64) float64 {
+	if z > 0 {
+		return z + math.Log1p(math.Exp(-z))
+	}
+	return math.Log1p(math.Exp(z))
+}
+
+// evaluate returns the objective, its gradient and the per-row curvature of p
+// at theta. total is the sum of p.w.
+func (p logisticProblem) evaluate(theta []float64, total float64) logisticPoint {
+	d := len(theta) - 1
+	pt := logisticPoint{theta: theta, grad: make([]float64, d+1), curv: make([]float64, len(p.x))}
+	var loss float64
+	for i, row := range p.x {
+		z := theta[d]
+		for j, v := range row {
+			z += theta[j] * v
+		}
+		s := sigmoid(z)
+		pt.curv[i] = s * (1 - s)
+		loss += p.w[i] * (softplus(z) - p.y[i]*z)
+		r := p.w[i] * (s - p.y[i])
+		pt.grad[d] += r
+		for j, v := range row {
+			pt.grad[j] += r * v
+		}
+	}
+	ridge := p.l2 / float64(len(p.x))
+	var sq float64
+	for j := 0; j < d; j++ {
+		sq += theta[j] * theta[j]
+		pt.grad[j] = pt.grad[j]/total + ridge*theta[j]
+	}
+	pt.grad[d] /= total
+	pt.loss = loss/total + ridge*sq/2
+	return pt
+}
+
+// choleskySolve solves A*x = b for a symmetric A of order m held row-major in
+// its lower triangle. It overwrites a with the Cholesky factor and b with x.
+// A pivot that is not positive and finite means A is not positive definite.
+func choleskySolve(a []float64, m int, b []float64) error {
+	for j := 0; j < m; j++ {
+		s := a[j*m+j]
+		for k := 0; k < j; k++ {
+			s -= a[j*m+k] * a[j*m+k]
+		}
+		if !(s > 0) || math.IsInf(s, 0) {
+			return fmt.Errorf("the system is not positive definite (pivot %d is %v)", j, s)
+		}
+		ljj := math.Sqrt(s)
+		a[j*m+j] = ljj
+		for i := j + 1; i < m; i++ {
+			t := a[i*m+j]
+			for k := 0; k < j; k++ {
+				t -= a[i*m+k] * a[j*m+k]
+			}
+			a[i*m+j] = t / ljj
+		}
+	}
+	for i := 0; i < m; i++ {
+		s := b[i]
+		for k := 0; k < i; k++ {
+			s -= a[i*m+k] * b[k]
+		}
+		b[i] = s / a[i*m+i]
+	}
+	for i := m - 1; i >= 0; i-- {
+		s := b[i]
+		for k := i + 1; k < m; k++ {
+			s -= a[k*m+i] * b[k]
+		}
+		b[i] = s / a[i*m+i]
+	}
+	return nil
+}
+
+// newtonStep returns the Newton step -H^-1*g at pt. H is the Hessian of the
+// objective: the curvature-weighted cross products of the rows (with the
+// constant bias column appended) plus the ridge on the weight diagonal.
+func (p logisticProblem) newtonStep(pt logisticPoint, total float64) ([]float64, error) {
+	m := len(pt.theta)
+	d := m - 1
+	h := make([]float64, m*m)
+	xr := make([]float64, m)
+	xr[d] = 1
+	for i, row := range p.x {
+		c := p.w[i] * pt.curv[i] / total
+		if c == 0 {
+			continue
+		}
+		copy(xr, row)
+		for a := 0; a < m; a++ {
+			ca := c * xr[a]
+			if ca == 0 {
+				continue
+			}
+			for b := 0; b <= a; b++ {
+				h[a*m+b] += ca * xr[b]
+			}
+		}
+	}
+	ridge := p.l2 / float64(len(p.x))
+	for j := 0; j < d; j++ {
+		h[j*m+j] += ridge
+	}
+	step := make([]float64, m)
+	for j, g := range pt.grad {
+		step[j] = -g
+	}
+	if err := choleskySolve(h, m, step); err != nil {
+		return nil, err
+	}
+	return step, nil
+}
+
+const (
+	// maxHalvings bounds the backtracking line search: it tries the full
+	// Newton step and then up to this many halvings of it.
+	maxHalvings = 60
+	// objectiveNoise is the relative rounding noise of the objective, a sum
+	// of many terms. Near the optimum the objective gain of a Newton step is
+	// smaller than it, so a step is accepted while the objective has not
+	// risen by more than this; otherwise the search would shrink steps that
+	// still reduce the gradient until they were too small to move anything.
+	objectiveNoise = 1e-12
+)
+
+// backtrack halves the step along delta from cur until the objective does not
+// increase (beyond rounding noise), so each iteration is a descent step. It
+// reports false when neither the step nor any of its first maxHalvings
+// halvings qualifies.
+func (p logisticProblem) backtrack(cur logisticPoint, delta []float64, total float64) (logisticPoint, bool) {
+	limit := cur.loss + objectiveNoise*(1+math.Abs(cur.loss))
+	step := 1.0
+	for h := 0; h <= maxHalvings; h++ {
+		trial := make([]float64, len(cur.theta))
+		for j := range trial {
+			trial[j] = cur.theta[j] + step*delta[j]
+		}
+		next := p.evaluate(trial, total)
+		if isFinite(next.loss) && next.loss <= limit {
+			return next, true
+		}
+		step /= 2
+	}
+	return logisticPoint{}, false
+}
+
+// descend minimizes p from (w0, b0) by Newton steps with a backtracking line
+// search. It stops when the largest absolute gradient component falls below
+// opts.Tol (converged true) or after opts.MaxIter steps (converged false, the
+// last point still returned). A gradient or step that is not finite, a step
+// no halving of which lowers the objective, or a Hessian that is not positive
+// definite is an error.
 func descend(p logisticProblem, w0 []float64, b0 float64, opts LogisticOptions) (weights []float64, bias float64, iters int, converged bool, err error) {
-	d := len(w0)
-	weights = append([]float64(nil), w0...)
-	bias = b0
 	var total float64
 	for _, wi := range p.w {
 		total += wi
@@ -205,62 +402,46 @@ func descend(p logisticProblem, w0 []float64, b0 float64, opts LogisticOptions) 
 	if !(total > 0) || math.IsInf(total, 0) {
 		return nil, 0, 0, false, fmt.Errorf("total example weight %v, want finite and positive", total)
 	}
-	ridge := p.l2 / float64(len(p.x))
-	grad := make([]float64, d)
+	cur := p.evaluate(append(append([]float64(nil), w0...), b0), total)
+	d := len(w0)
 	for {
-		for j := range grad {
-			grad[j] = 0
+		worst := 0.0
+		for _, g := range cur.grad {
+			worst = math.Max(worst, math.Abs(g))
 		}
-		var gradBias float64
-		for i, row := range p.x {
-			z := bias
-			for j, v := range row {
-				z += weights[j] * v
-			}
-			target := 0.0
-			if p.y[i] {
-				target = 1
-			}
-			r := p.w[i] * (sigmoid(z) - target)
-			gradBias += r
-			for j, v := range row {
-				grad[j] += r * v
-			}
-		}
-		gradBias /= total
-		worst := math.Abs(gradBias)
-		for j := range grad {
-			grad[j] = grad[j]/total + ridge*weights[j]
-			worst = math.Max(worst, math.Abs(grad[j]))
-		}
-		if !isFinite(worst) {
+		if !isFinite(worst) || !isFinite(cur.loss) {
 			return nil, 0, iters, false, fmt.Errorf("gradient is not finite after %d iterations", iters)
 		}
 		if worst < opts.Tol {
-			return weights, bias, iters, true, nil
+			return append([]float64(nil), cur.theta[:d]...), cur.theta[d], iters, true, nil
 		}
 		if iters >= opts.MaxIter {
-			return weights, bias, iters, false, nil
+			return append([]float64(nil), cur.theta[:d]...), cur.theta[d], iters, false, nil
 		}
-		for j := range weights {
-			weights[j] -= opts.LearningRate * grad[j]
+		delta, err := p.newtonStep(cur, total)
+		if err != nil {
+			return nil, 0, iters, false, fmt.Errorf("newton step %d: %w", iters+1, err)
 		}
-		bias -= opts.LearningRate * gradBias
-		iters++
-		if !isFinite(bias) {
-			return nil, 0, iters, false, fmt.Errorf("descent diverged after %d iterations", iters)
-		}
-		for _, v := range weights {
+		for _, v := range delta {
 			if !isFinite(v) {
-				return nil, 0, iters, false, fmt.Errorf("descent diverged after %d iterations", iters)
+				return nil, 0, iters, false, fmt.Errorf("newton step %d is not finite", iters+1)
 			}
 		}
+		next, ok := p.backtrack(cur, delta, total)
+		if !ok {
+			return nil, 0, iters, false, fmt.Errorf("newton step %d does not lower the objective", iters+1)
+		}
+		cur = next
+		iters++
 	}
 }
 
-// fitPlatt fits P(y) = sigmoid(a*z + b) on raw logits z with example weights
-// w by the same weighted descent in one dimension, starting from a=1, b=0,
-// with no penalty.
+// fitPlatt fits P(y) = sigmoid(a*z + b) on raw logits z with example weights w
+// against the regularized Platt targets, by the same Newton solver in two
+// dimensions, with no penalty. It starts from the constant prediction a=0,
+// b=log((N+ + 1)/(N- + 1)) (Platt 1999): started at a=1 the rows of a scale
+// set far outside the fit sit on the flat tails of the sigmoid, where the
+// Hessian vanishes and no Newton step is usable.
 func fitPlatt(z []float64, y []bool, w []float64, opts LogisticOptions) (a, b float64, iters int, converged bool, err error) {
 	if len(z) == 0 || len(y) != len(z) || len(w) != len(z) {
 		return 0, 0, 0, false, fmt.Errorf("platt fit needs equal non-empty inputs, got %d logits, %d labels, %d weights", len(z), len(y), len(w))
@@ -272,7 +453,9 @@ func fitPlatt(z []float64, y []bool, w []float64, opts LogisticOptions) (a, b fl
 		}
 		rows[i] = []float64{v}
 	}
-	weights, bias, iters, converged, err := descend(logisticProblem{x: rows, y: y, w: w}, []float64{1}, 0, opts)
+	pos, neg := plattCounts(y, w)
+	weights, bias, iters, converged, err := descend(
+		logisticProblem{x: rows, y: plattTargets(y, w), w: w}, []float64{0}, math.Log((pos+1)/(neg+1)), opts)
 	if err != nil {
 		return 0, 0, iters, false, err
 	}
@@ -330,9 +513,10 @@ func (m LogisticModel) logit(f []float64) float64 {
 
 // FitLogistic fits a standardized logistic regression on fit and Platt
 // scaling on scale. Class weights balance positives and negatives within each
-// set and multiply Example.Weight. The fit is deterministic. Both sets must
-// hold both classes and finite features of one width. The caller decides what
-// to do with a model whose Converged is false.
+// set and multiply Example.Weight. Both fits are Newton solves; Platt scaling
+// uses the regularized targets of plattTargets. The fit is deterministic. Both
+// sets must hold both classes and finite features of one width. The caller
+// decides what to do with a model whose Converged is false.
 func FitLogistic(fit, scale []Example, opts LogisticOptions) (LogisticModel, error) {
 	if err := opts.validate(); err != nil {
 		return LogisticModel{}, fmt.Errorf("logistic options: %w", err)
@@ -361,9 +545,9 @@ func FitLogistic(fit, scale []Example, opts LogisticOptions) (LogisticModel, err
 		}
 	}
 	weights, bias, iters, converged, err := descend(
-		logisticProblem{x: x, y: exampleLabels(fit), w: fitWeights, l2: opts.L2}, make([]float64, d), 0, opts)
+		logisticProblem{x: x, y: labelTargets(exampleLabels(fit)), w: fitWeights, l2: opts.L2}, make([]float64, d), 0, opts)
 	if err != nil {
-		return LogisticModel{}, fmt.Errorf("fit descent: %w", err)
+		return LogisticModel{}, fmt.Errorf("fit solve: %w", err)
 	}
 	m := LogisticModel{
 		FeatureVersion: impact.FeatureVersion,
