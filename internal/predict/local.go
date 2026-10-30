@@ -1,14 +1,17 @@
 package predict
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
 
+	"github.com/omorsi45/hazard/internal/change"
 	"github.com/omorsi45/hazard/internal/impact"
 )
 
-// LocalProb is one local prediction; the shared Prob type is added by the remote-predictor change and the two are joined at integration.
+// LocalProb is one local prediction: the probability of Score, without the
+// request accounting of Prob.
 type LocalProb struct {
 	TestID string
 	P      float64
@@ -89,6 +92,51 @@ func (l *Logistic) Score(c []impact.Candidate) ([]LocalProb, error) {
 
 func sortProbs(ps []LocalProb) {
 	sort.SliceStable(ps, func(i, j int) bool { return ps[i].TestID < ps[j].TestID })
+}
+
+var (
+	_ Predictor = (*Static)(nil)
+	_ Predictor = (*Logistic)(nil)
+)
+
+// Name is "static".
+func (s *Static) Name() string { return "static" }
+
+// Predict returns one Prob per candidate, Source "static", through Score.
+// Candidates must be in TestID order, as the Predictor contract has it: Score
+// answers in that order, and an answer that does not line up with the
+// candidates is an error, never a probability paired with the wrong test.
+func (s *Static) Predict(ctx context.Context, _ *change.ChangeSet, cands []impact.Candidate) ([]Prob, error) {
+	return predictLocal(ctx, "static", s.Score, cands)
+}
+
+// Name is "logistic".
+func (l *Logistic) Name() string { return "logistic" }
+
+// Predict returns one Prob per candidate, Source "logistic", through Score,
+// under the same ordering contract as (*Static).Predict.
+func (l *Logistic) Predict(ctx context.Context, _ *change.ChangeSet, cands []impact.Candidate) ([]Prob, error) {
+	return predictLocal(ctx, "logistic", l.Score, cands)
+}
+
+// predictLocal turns the answer of a local scorer into validated Probs. No
+// request was made, so Shard is -1 and latency and cost are zero.
+func predictLocal(ctx context.Context, source string, score func([]impact.Candidate) ([]LocalProb, error), cands []impact.Candidate) ([]Prob, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	scored, err := score(cands)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Prob, len(scored))
+	for i, lp := range scored {
+		out[i] = Prob{TestID: lp.TestID, P: lp.P, Source: source, Shard: -1}
+	}
+	if err := ValidateProbs(cands, out); err != nil {
+		return nil, fmt.Errorf("%s predictor: %w", source, err)
+	}
+	return out, nil
 }
 
 // splitEpsilon absorbs floating point error in n*fraction, which can land just

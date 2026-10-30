@@ -53,9 +53,10 @@ type Impact struct {
 	CandidateRanking      []string `yaml:"candidate_ranking"`
 }
 type Predictor struct {
-	Kind     string   `yaml:"kind"`
-	Jev      Jev      `yaml:"jev"`
-	Logistic Logistic `yaml:"logistic"`
+	Kind     string          `yaml:"kind"`
+	Jev      Jev             `yaml:"jev"`
+	Static   StaticPredictor `yaml:"static"`
+	Logistic Logistic        `yaml:"logistic"`
 }
 type Jev struct {
 	Endpoint            string  `yaml:"endpoint"`
@@ -69,6 +70,9 @@ type Jev struct {
 	RetryBackoffMS      int     `yaml:"retry_backoff_ms"`
 	Concurrency         int     `yaml:"concurrency"`
 	BudgetUSDPerRun     float64 `yaml:"budget_usd_per_run"`
+}
+type StaticPredictor struct {
+	Calibration string `yaml:"calibration"`
 }
 type Logistic struct {
 	Weights string `yaml:"weights"`
@@ -119,6 +123,7 @@ func Defaults() Config {
 		Predictor: Predictor{
 			Kind:     "ensemble",
 			Jev:      Jev{Endpoint: "https://openrouter.ai/api/alpha/decisions", Model: "typesafe/jev-1.13", APIKeyEnv: "OPENROUTER_API_KEY", QuestionsPerRequest: 200, MaxStateTokens: 12000, MaxRequestTokens: 28000, TimeoutMS: 3000, Retries: 2, RetryBackoffMS: 200, Concurrency: 4, BudgetUSDPerRun: 0.01},
+			Static:   StaticPredictor{Calibration: ".hazard/static.json"},
 			Logistic: Logistic{Weights: ".hazard/logistic.json"},
 		},
 		Control:   Control{Alpha: 0.01, Delta: 0.05, Unit: "commit", RequireLock: true, LockMismatchAction: "full", MinSavingRatio: 0.15, Drift: Drift{WindowRuns: 500, EscalateIfUCBAboveAlpha: true}},
@@ -273,7 +278,7 @@ func (c Config) Validate() error {
 	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil {
 		return invalid("predictor.jev.endpoint")
 	}
-	if j.Model == "" || j.APIKeyEnv == "" || c.Predictor.Logistic.Weights == "" {
+	if j.Model == "" || j.APIKeyEnv == "" || c.Predictor.Logistic.Weights == "" || c.Predictor.Static.Calibration == "" {
 		return invalid("predictor identity")
 	}
 	if !positive(j.QuestionsPerRequest) || !positive(j.MaxStateTokens) || !positive(j.MaxRequestTokens) || !positive(j.TimeoutMS) || j.Retries < 0 || !positive(j.RetryBackoffMS) || !positive(j.Concurrency) || j.RetryBackoffMS >= j.TimeoutMS {

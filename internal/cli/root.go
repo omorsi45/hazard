@@ -67,6 +67,7 @@ func NewRoot() *cobra.Command {
 	root.AddCommand(newLabelsCommand(newLabelsBackend()))
 
 	root.AddCommand(newMutateCommand(mutate.Run))
+	root.AddCommand(newTrainCommand())
 
 	calibrate := leaf("calibrate", "Calibrate selection risk")
 	calibrate.Flags().Float64("alpha", 0.01, "target miss rate")
