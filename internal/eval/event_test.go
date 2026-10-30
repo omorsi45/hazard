@@ -147,7 +147,7 @@ func TestPredictedAbstainsWhenL1DemandsTheFullSuite(t *testing.T) {
 func TestPairsAreLabelledByTheFailingSet(t *testing.T) {
 	e := fixtureEvent("m1", "test", []string{"t1"}, []control.Candidate{cand("t1", 0.4), cand("t2", 0.05)}, fixtureLayer(0))
 	got := e.Pairs("static")
-	want := []ProbLabel{{P: 0.4, Label: true}, {P: 0.05, Label: false}}
+	want := []ProbLabel{{Test: "t1", P: 0.4, Label: true}, {Test: "t2", P: 0.05, Label: false}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Pairs = %+v, want %+v", got, want)
 	}

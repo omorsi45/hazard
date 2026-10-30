@@ -249,7 +249,7 @@ func TestBinOfPlacesTheEdges(t *testing.T) {
 
 func TestReliabilityBinsCountMeanAndObservedRate(t *testing.T) {
 	pairs := []ProbLabel{
-		{0.0, false}, {0.05, false}, {0.15, true}, {0.5, false}, {0.95, true}, {1.0, false},
+		{P: 0.0}, {P: 0.05}, {P: 0.15, Label: true}, {P: 0.5}, {P: 0.95, Label: true}, {P: 1.0},
 	}
 	bins := ReliabilityBins(pairs)
 	if len(bins) != 10 {

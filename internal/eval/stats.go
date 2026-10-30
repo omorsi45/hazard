@@ -28,6 +28,12 @@ const (
 	MetricLatency        = "latency_p95_ms"
 )
 
+// metricOrder lists every metric in the order the tables print them.
+var metricOrder = []string{
+	MetricRecallCommit, MetricRecallFailure, MetricSelectionRatio, MetricTimeRatio, MetricAbstention,
+	MetricSaving, MetricBrier, MetricUSD, MetricLatency, MetricTruncation,
+}
+
 // bins is the number of equal-width reliability bins (seed 12.1).
 const bins = 10
 
@@ -80,8 +86,9 @@ type Bin struct {
 }
 
 // ProbLabel is one (change, test) pair: the predicted probability and whether
-// the test failed.
+// the test failed. Test names the test and plays no part in the bins.
 type ProbLabel struct {
+	Test  string
 	P     float64
 	Label bool
 }

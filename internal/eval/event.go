@@ -86,7 +86,7 @@ func (e *Event) Pairs(kind string) []ProbLabel {
 	}
 	pairs := make([]ProbLabel, len(s.Cands))
 	for i, c := range s.Cands {
-		pairs[i] = ProbLabel{P: probability(c), Label: e.failSet[c.TestID]}
+		pairs[i] = ProbLabel{Test: c.TestID, P: probability(c), Label: e.failSet[c.TestID]}
 	}
 	return pairs
 }
