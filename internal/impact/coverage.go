@@ -134,14 +134,34 @@ type coverageEval struct {
 	unknown []string          // packages of changed source files whose coverage does not apply
 }
 
+// blockUnion returns, per file, the merged lines that the blocks of any test
+// contain, whatever the test's status.
+func blockUnion(cov *index.Coverage) map[string][]span {
+	byFile := map[string][]span{}
+	for _, tc := range cov.Tests {
+		for _, b := range tc.Blocks {
+			byFile[b.File] = append(byFile[b.File], span{b.StartLine, b.EndLine})
+		}
+	}
+	for file, spans := range byFile {
+		byFile[file] = mergeSpans(spans)
+	}
+	return byFile
+}
+
 // evalCoverage classifies every changed source file as coverage-known or
 // coverage-unknown. Coverage applies to a file only when the base content
-// digest equals the digest recorded at collection and the diff gives its
-// changed lines.
+// digest equals the digest recorded at collection, the diff gives its changed
+// lines, and every changed old-side line lies in a block of some test. A line
+// in no block of any test is not evidence that no test depends on it: it may
+// not be instrumented at all (a package-level variable initializer is never a
+// block), and a profile of executed blocks cannot tell that from a line no
+// test ran. Such a file is unknown, like a digest mismatch.
 func evalCoverage(in Input, files []change.ChangedFile, m changeMapping) coverageEval {
 	ev := coverageEval{known: map[string][]span{}}
 	cov := in.Index.Coverage
 	unknown := map[string]bool{}
+	var union map[string][]span // built on the first file that needs it
 	for _, f := range files {
 		if f.Kind == change.KindTest || fileLanguage(f) == "" {
 			continue
@@ -155,8 +175,13 @@ func evalCoverage(in Input, files []change.ChangedFile, m changeMapping) coverag
 		baseDigest, haveBase := in.BaseDigests[base]
 		covDigest, haveCov := cov.FileDigests[base]
 		if !f.Binary && len(f.Hunks) > 0 && haveBase && haveCov && baseDigest != "" && baseDigest == covDigest {
-			ev.known[base] = mergeSpans(append(ev.known[base], spans...))
-			continue
+			if union == nil {
+				union = blockUnion(cov)
+			}
+			if spanOverlap(union[base], spans) == spanLen(spans) {
+				ev.known[base] = mergeSpans(append(ev.known[base], spans...))
+				continue
+			}
 		}
 		for _, id := range m.filePkgs[f.Path] {
 			unknown[id] = true
