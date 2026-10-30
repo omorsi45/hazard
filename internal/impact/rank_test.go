@@ -389,6 +389,7 @@ func TestCoverageOverlapRatio(t *testing.T) {
 	)
 	in := coverageInput(cs)
 	in.Index.Coverage.FileDigests["left/left.go"] = "different"
+	cover(in.Index, testID("m/core", "TestCore"), "covered", blk("core/core.go", 10, 12)) // core.go lines are all inside a block, so core.go is coverage-known
 	files := sortedFiles(cs)
 	ev := evalCoverage(in, files, mapChange(in.Index, files))
 	if ev.total != 5 {
@@ -416,6 +417,7 @@ func TestCandidateCoverageFlags(t *testing.T) {
 	}
 
 	in := coverageInput(core)
+	cover(in.Index, testID("m/core", "TestCore"), "covered", blk("core/core.go", 10, 12)) // keeps the changed lines inside a block, so the file stays coverage-known
 	cover(in.Index, testID("m/core", "TestCoreAux"), "covered", blk("core/core.go", 50, 60))
 	r := mustL1(t, in)
 	aux := find(r, testID("m/core", "TestCoreAux")).Features
