@@ -24,6 +24,9 @@ import (
 // tokens, used to reserve the cost of a request before it is sent.
 const DefaultPricePerMTok = 0.042
 
+// dryRunKey stands in for the API key of a client that only builds payloads.
+const dryRunKey = "dry-run: no request is sent"
+
 const (
 	// failedShardP is the probability of a test whose shard gave no usable
 	// answer. A failure selects the test, so it must stay at the top of the
@@ -170,6 +173,22 @@ func NewJev(opts JevOptions) (*Jev, error) {
 		j.now = time.Now
 	}
 	return j, nil
+}
+
+// DryRunPayload returns the request bodies a call with opts would send for
+// cands, exactly as (*Jev).Payload does, without needing an API key: no
+// request is made, so opts.APIKey is ignored. It refuses the same options
+// NewJev refuses, so a privacy setting that forbids the external predictor
+// forbids the dry run too.
+func DryRunPayload(opts JevOptions, ch *change.ChangeSet, cands []impact.Candidate) ([][]byte, error) {
+	// A client needs a key to exist; this one never sends anything, so a
+	// placeholder is enough and a real key never enters the dry run.
+	opts.APIKey = dryRunKey
+	j, err := NewJev(opts)
+	if err != nil {
+		return nil, err
+	}
+	return j.Payload(ch, cands)
 }
 
 func validateJevConfig(c config.Jev) error {

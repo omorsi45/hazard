@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/omorsi45/hazard/internal/config"
 )
 
 func sortedBodies(bodies [][]byte) []string {
@@ -131,5 +133,97 @@ func TestJevDryRunIsTheSameForEveryClient(t *testing.T) {
 	}
 	if !equalStrings(sortedBodies(a), sortedBodies(b)) {
 		t.Fatal("two clients built different payloads for the same input")
+	}
+}
+
+// dryRunOptions are the options newTestJev builds, with the mutation applied.
+func dryRunOptions(mutate func(*JevOptions)) JevOptions {
+	opts := JevOptions{
+		Config:        jevConfig(),
+		Privacy:       config.Defaults().Privacy,
+		RubricVersion: "r1",
+		APIKey:        testKey,
+		Now:           fixedNow,
+	}
+	if mutate != nil {
+		mutate(&opts)
+	}
+	return opts
+}
+
+func TestDryRunPayloadEqualsPayloadOfAClientWithAKey(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*JevOptions)
+		n      int
+	}{
+		{"three shards at structure", nil, 450},
+		{"tier question", func(o *JevOptions) { o.AskTier = true }, 250},
+		{"short rubric", func(o *JevOptions) { o.RubricVersion = "r1s" }, 205},
+		{"none with hunk text", func(o *JevOptions) {
+			o.Privacy.Redact = "none"
+			o.Privacy.SendHunkText = true
+		}, 3},
+		{"no candidates", nil, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cands := candidatesN(tc.n)
+			want, err := newTestJev(t, tc.mutate).Payload(sentinelChange(), cands)
+			if err != nil {
+				t.Fatalf("Payload: %v", err)
+			}
+
+			keyless := dryRunOptions(tc.mutate)
+			keyless.APIKey = ""
+			got, err := DryRunPayload(keyless, sentinelChange(), cands)
+
+			if err != nil {
+				t.Fatalf("DryRunPayload without a key: %v", err)
+			}
+			if len(got) != len(want) || !equalStrings(sortedBodies(got), sortedBodies(want)) {
+				t.Fatalf("DryRunPayload gave %d requests that differ from the %d of Payload", len(got), len(want))
+			}
+		})
+	}
+}
+
+func TestDryRunPayloadIgnoresAGivenKeyAndNeverSendsAnything(t *testing.T) {
+	opts := dryRunOptions(func(o *JevOptions) {
+		o.HTTPClient = &http.Client{Transport: forbiddenTransport{t}}
+	})
+
+	got, err := DryRunPayload(opts, goldenChange(), candidatesN(450))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("%d requests, want 3 shards", len(got))
+	}
+	for _, body := range got {
+		if strings.Contains(string(body), testKey) {
+			t.Fatal("the payload holds the API key")
+		}
+	}
+}
+
+func TestDryRunPayloadKeepsEveryPrivacyRule(t *testing.T) {
+	for name, mutate := range map[string]func(*JevOptions){
+		"external predictor disabled": func(o *JevOptions) { o.Privacy.AllowExternalPredictor = false },
+		"hash redaction":              func(o *JevOptions) { o.Privacy.Redact = "hash" },
+		"unknown redaction":           func(o *JevOptions) { o.Privacy.Redact = "everything" },
+		"invalid configuration":       func(o *JevOptions) { o.Config.Endpoint = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := dryRunOptions(mutate)
+			opts.APIKey = ""
+
+			got, err := DryRunPayload(opts, goldenChange(), goldenCandidates())
+
+			if err == nil || got != nil {
+				t.Fatalf("DryRunPayload = %d requests, %v; want a refusal like NewJev's", len(got), err)
+			}
+		})
 	}
 }
