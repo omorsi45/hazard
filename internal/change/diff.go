@@ -26,8 +26,9 @@ type patchBlock struct {
 // parseDiff parses the output of `git diff --raw -p -z`: NUL-terminated raw
 // records, an empty field, then the patch text. Every path comes from the raw
 // records, so no patch header is ever parsed for a file name. A type change is
-// one raw record and two patch blocks (a deletion and an addition).
-func parseDiff(out []byte) ([]diffEntry, error) {
+// one raw record and two patch blocks (a deletion and an addition). With
+// keepText every hunk also keeps its diff lines (see parsePatch).
+func parseDiff(out []byte, keepText bool) ([]diffEntry, error) {
 	var entries []diffEntry
 	rest := out
 	for len(rest) > 0 && rest[0] == ':' {
@@ -68,7 +69,7 @@ func parseDiff(out []byte) ([]diffEntry, error) {
 	if len(rest) > 0 && rest[0] == 0 {
 		rest = rest[1:]
 	}
-	blocks, err := parsePatch(rest)
+	blocks, err := parsePatch(rest, keepText)
 	if err != nil {
 		return nil, err
 	}
@@ -112,28 +113,48 @@ func cutNUL(b []byte) (token, rest []byte) {
 // parsePatch splits patch text into one block per "diff --git" header and
 // reads the hunk headers and the binary marker of each. File contents inside
 // hunks are prefixed with '+', '-' or ' ', so no content line can look like a
-// header.
-func parsePatch(patch []byte) ([]patchBlock, error) {
+// header. With keepText the '+', '-' and ' ' lines of each hunk are stored,
+// newline-terminated, in Hunk.Text; the file headers before the first hunk and
+// the "\ No newline at end of file" markers are not diff lines and are left out.
+func parsePatch(patch []byte, keepText bool) ([]patchBlock, error) {
 	var blocks []patchBlock
+	var body bytes.Buffer
+	inHunk := false
+	// closeHunk stores the lines collected for the hunk that just ended.
+	closeHunk := func() {
+		if keepText && inHunk {
+			last := &blocks[len(blocks)-1]
+			last.hunks[len(last.hunks)-1].Text = body.String()
+		}
+		body.Reset()
+		inHunk = false
+	}
 	for len(patch) > 0 {
 		var line []byte
 		line, patch, _ = bytes.Cut(patch, []byte("\n"))
 		switch {
 		case bytes.HasPrefix(line, []byte("diff --git ")):
+			closeHunk()
 			blocks = append(blocks, patchBlock{})
 		case len(blocks) == 0:
 			return nil, fmt.Errorf("patch text before the first diff header: %q", stderrTail(string(line)))
 		case bytes.HasPrefix(line, []byte("@@ ")):
+			closeHunk()
 			h, err := parseHunkHeader(string(line))
 			if err != nil {
 				return nil, err
 			}
 			last := &blocks[len(blocks)-1]
 			last.hunks = append(last.hunks, h)
+			inHunk = true
 		case bytes.HasPrefix(line, []byte("Binary files ")) && bytes.HasSuffix(line, []byte(" differ")):
 			blocks[len(blocks)-1].binary = true
+		case inHunk && len(line) > 0 && (line[0] == '+' || line[0] == '-' || line[0] == ' '):
+			body.Write(line)
+			body.WriteByte('\n')
 		}
 	}
+	closeHunk()
 	return blocks, nil
 }
 

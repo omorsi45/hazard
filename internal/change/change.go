@@ -32,8 +32,8 @@ var kindNames = [...]string{"source", "test", "config", "fixture", "generated", 
 
 // Hunk is one -U0 diff hunk. Symbols lists the declarations the hunk touches
 // (old side from the base contents, new side from the head contents) or
-// "__file__" when a range touches no declaration. Text is left empty: Options
-// carries no privacy setting that would allow hunk text to leave the process.
+// "__file__" when a range touches no declaration. Text holds the hunk's diff
+// lines when Options.HunkText is set and is empty otherwise.
 type Hunk struct {
 	OldStart, OldLines int
 	NewStart, NewLines int
@@ -62,10 +62,14 @@ type ChangeSet struct {
 	Dirty                    bool
 }
 
-// Options selects the diff and the patterns Extract applies.
+// Options selects the diff and the patterns Extract applies. HunkText keeps
+// the diff lines of every hunk in Hunk.Text. The text stays in memory: the
+// caller decides, through the privacy configuration, what may leave the
+// process.
 type Options struct {
 	Base, Head, DefaultBranch         string
 	FullSuiteTriggers, GeneratedGlobs []string
+	HunkText                          bool
 }
 
 // ErrNoMergeBase means no trustworthy merge base exists: a shallow clone with

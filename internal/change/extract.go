@@ -88,7 +88,7 @@ func Extract(ctx context.Context, repoDir string, opts Options) (cs *ChangeSet, 
 	if err != nil {
 		return nil, err
 	}
-	entries, err := parseDiff(out)
+	entries, err := parseDiff(out, opts.HunkText)
 	if err != nil {
 		return nil, fmt.Errorf("git diff %s: %w", baseSHA, err)
 	}
@@ -361,13 +361,16 @@ func buildFiles(ctx context.Context, root string, entries []diffEntry, untracked
 
 	for _, rel := range untracked {
 		lang := langOf(rel)
-		info, err := scanUntracked(root, rel, lang != "")
+		info, err := scanUntracked(root, rel, lang != "" || opts.HunkText)
 		if err != nil {
 			return nil, err
 		}
 		var hunks []Hunk
 		if info.lines > 0 && !info.binary {
 			hunks = []Hunk{{NewStart: 1, NewLines: info.lines}}
+			if opts.HunkText {
+				hunks[0].Text = addedText(info.content)
+			}
 		}
 		if w := byPath[rel]; w != nil {
 			// Removed from the index but still on disk: the whole file was
@@ -468,6 +471,20 @@ type untrackedInfo struct {
 	binary  bool
 	lines   int
 	content []byte // only when requested
+}
+
+// addedText is the hunk text git would print for a file added with the given
+// contents: every line behind a '+', newline-terminated.
+func addedText(content []byte) string {
+	var b strings.Builder
+	for len(content) > 0 {
+		var line []byte
+		line, content, _ = bytes.Cut(content, []byte("\n"))
+		b.WriteByte('+')
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // scanUntracked inspects an untracked path the way git would diff it against

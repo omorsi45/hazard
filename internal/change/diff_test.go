@@ -37,7 +37,7 @@ func TestParsePatch(t *testing.T) {
 		"diff --git a/r.txt b/s.txt\nsimilarity index 100%\nrename from r.txt\nrename to s.txt\n" +
 		// Content lines that look like headers are prefixed and must be ignored.
 		"diff --git a/t.txt b/t.txt\n--- a/t.txt\n+++ b/t.txt\n@@ -1 +1 @@\n-diff --git a/fake b/fake\n+@@ -1 +1 @@\n+Binary files x and y differ\n"
-	got, err := parsePatch([]byte(patch))
+	got, err := parsePatch([]byte(patch), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,10 +51,10 @@ func TestParsePatch(t *testing.T) {
 		t.Errorf("parsePatch\n got: %+v\nwant: %+v", got, want)
 	}
 
-	if _, err := parsePatch([]byte("stray line\ndiff --git a/a b/a\n")); err == nil {
+	if _, err := parsePatch([]byte("stray line\ndiff --git a/a b/a\n"), false); err == nil {
 		t.Error("parsePatch accepted text before the first header")
 	}
-	if _, err := parsePatch([]byte("diff --git a/a b/a\n@@ nonsense @@\n")); err == nil {
+	if _, err := parsePatch([]byte("diff --git a/a b/a\n@@ nonsense @@\n"), false); err == nil {
 		t.Error("parsePatch accepted a malformed hunk header")
 	}
 }
@@ -74,7 +74,7 @@ func TestParseDiff(t *testing.T) {
 	t.Parallel()
 	t.Run("empty", func(t *testing.T) {
 		t.Parallel()
-		got, err := parseDiff(nil)
+		got, err := parseDiff(nil, false)
 		if err != nil || len(got) != 0 {
 			t.Errorf("parseDiff(nil) = %+v, %v", got, err)
 		}
@@ -90,7 +90,7 @@ func TestParseDiff(t *testing.T) {
 			"diff --git a/old.go b/moved/new.go\nrename from old.go\nrename to moved/new.go\n@@ -4 +4 @@\n-x\n+y\n" +
 			"diff --git a/m.go b/m.go\nBinary files a/m.go and b/m.go differ\n" +
 			"diff --git a/gone.go b/gone.go\ndeleted file mode 100644\n@@ -1,3 +0,0 @@\n-a\n-b\n-c\n"
-		got, err := parseDiff([]byte(out))
+		got, err := parseDiff([]byte(out), false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -111,7 +111,7 @@ func TestParseDiff(t *testing.T) {
 			"diff --git a/link b/link\ndeleted file mode 100644\n@@ -1 +0,0 @@\n-x\n" +
 			"diff --git a/link b/link\nnew file mode 120000\n@@ -0,0 +1 @@\n+target\n" +
 			"diff --git a/z.go b/z.go\n@@ -2 +2 @@\n-a\n+b\n"
-		got, err := parseDiff([]byte(out))
+		got, err := parseDiff([]byte(out), false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -137,7 +137,7 @@ func TestParseDiff(t *testing.T) {
 	for _, tc := range badInputs {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := parseDiff([]byte(tc.out))
+			got, err := parseDiff([]byte(tc.out), false)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("parseDiff = %+v, %v; want an error containing %q", got, err, tc.want)
 			}
