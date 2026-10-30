@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -23,9 +24,13 @@ var featureNames = []string{
 }
 
 const (
-	noPredictor = "n/a (no predictor in M3)"
-	noShard     = "n/a"
-	noLambda    = "n/a (no lock)"
+	noPredictor    = "n/a (the predictor was not asked)"
+	certainNoScore = "n/a (a CERTAIN test is not scored)"
+	noShard        = "n/a"
+	noRequest      = "n/a (no request answered)"
+	noLambda       = "n/a (no verified lock)"
+	notApplicable  = "n/a"
+	unknownValue   = "unknown"
 )
 
 // explanation is what `hazard explain` reports about one test.
@@ -37,14 +42,19 @@ type explanation struct {
 	L1                   string             `json:"l1"`
 	Rank                 *float64           `json:"rank,omitempty"`
 	Features             map[string]float64 `json:"features,omitempty"`
+	CoverageOverlap      *float64           `json:"coverage_overlap"` // null when unknown or when the test is not a ranked candidate
+	CofailureRate        *float64           `json:"cofailure_rate"`   // null when unknown or when the test is not a ranked candidate
 	CoverageState        string             `json:"coverage_state"`
-	PredictorProbability string             `json:"predictor_probability"`
-	Shard                string             `json:"shard"`
-	Lambda               string             `json:"lambda"`
+	PredictorProbability string             `json:"predictor_probability"` // "P (source)", or why there is none
+	Shard                string             `json:"shard"`                 // the request that answered, or why there was none
+	Lambda               string             `json:"lambda"`                // the threshold of the verified lock
 	Decision             string             `json:"decision"`
 
-	hopsText     string
-	featureOrder []string
+	hopsText      string
+	overlapText   string
+	cofailureText string
+	featureOrder  []string
+	certain       bool
 }
 
 func newExplainCommand(sel selectFunc) *cobra.Command {
@@ -96,6 +106,10 @@ func explain(d engine.Decision, testID string) (explanation, error) {
 	e := explanation{
 		Test: testID, InInventory: "unknown", hopsText: "unknown", L1: "not computed (" + reasonOf(d, false) + ")",
 		CoverageState: "n/a", PredictorProbability: noPredictor, Shard: noShard, Lambda: noLambda,
+		overlapText: notApplicable, cofailureText: notApplicable,
+	}
+	if d.LockDigest != "" {
+		e.Lambda = formatNumber(d.Lambda)
 	}
 	if r := d.L1; r != nil {
 		i := sort.SearchStrings(r.AllTests, testID)
@@ -106,16 +120,61 @@ func explain(d engine.Decision, testID string) (explanation, error) {
 		e.CoverageState = r.CoverageState
 		explainL1(&e, r, testID)
 	}
+	score, scored := scoreOf(d.Scores, testID)
 	switch {
-	case d.FullSuite:
-		e.Decision = "full suite: " + reasonOf(d, false)
-	case containsTest(d.Tests, testID):
-		e.Decision = "selected"
-	default:
-		e.Decision = "not selected"
+	case scored:
+		e.PredictorProbability = formatNumber(score.P) + " (" + score.Source + ")"
+		e.Shard = noRequest
+		if score.Shard >= 0 {
+			e.Shard = strconv.Itoa(score.Shard)
+		}
+	case e.certain:
+		e.PredictorProbability = certainNoScore
 	}
+	e.Decision = decisionLine(d, testID, score, scored)
 	return e, nil
 }
+
+// decisionLine is the final decision for one test: the full suite and why, the
+// source and reason of a selected test, or why a scored test was left out.
+func decisionLine(d engine.Decision, testID string, score engine.TestScore, scored bool) string {
+	if d.FullSuite {
+		return "full suite: " + reasonOf(d, false)
+	}
+	for _, s := range d.Tests {
+		if s.TestID != testID {
+			continue
+		}
+		var why []string
+		for _, part := range []string{s.Source, s.Reason} {
+			if part != "" {
+				why = append(why, part)
+			}
+		}
+		if len(why) == 0 {
+			return "selected"
+		}
+		return "selected (" + strings.Join(why, ", ") + ")"
+	}
+	if scored {
+		return fmt.Sprintf("not selected (P %s below lambda %s)", formatNumber(score.P), formatNumber(d.Lambda))
+	}
+	return "not selected"
+}
+
+// scoreOf finds what the predictor said about a test.
+func scoreOf(scores []engine.TestScore, testID string) (engine.TestScore, bool) {
+	for _, s := range scores {
+		if s.TestID == testID {
+			return s, true
+		}
+	}
+	return engine.TestScore{}, false
+}
+
+// formatNumber renders a probability or a threshold with at most six
+// significant digits.
+func formatNumber(v float64) string { return strconv.FormatFloat(v, 'g', 6, 64) }
 
 // explainL1 fills the L1 part of e for a test in the inventory.
 func explainL1(e *explanation, r *impact.Result, testID string) {
@@ -130,7 +189,7 @@ func explainL1(e *explanation, r *impact.Result, testID string) {
 	}
 	for _, m := range r.Certain {
 		if m.TestID == testID {
-			e.L1 = "certain (" + m.Reason + ")"
+			e.L1, e.certain = "certain ("+m.Reason+")", true
 			return
 		}
 	}
@@ -145,6 +204,7 @@ func explainL1(e *explanation, r *impact.Result, testID string) {
 			e.Features[featureNames[i]] = v
 			e.featureOrder = append(e.featureOrder, featureNames[i])
 		}
+		explainHistory(e, c.Features)
 		return
 	}
 	e.L1 = "residual, not ranked"
@@ -153,13 +213,18 @@ func explainL1(e *explanation, r *impact.Result, testID string) {
 	}
 }
 
-func containsTest(list []engine.Selected, id string) bool {
-	for _, s := range list {
-		if s.TestID == id {
-			return true
-		}
+// explainHistory reports the coverage overlap and the co-failure rate of a
+// candidate, or that they are unknown. Unknown is not zero.
+func explainHistory(e *explanation, f impact.Features) {
+	e.overlapText, e.cofailureText = unknownValue, unknownValue
+	if f.CoverageKnown {
+		v := f.CoverageOverlap
+		e.CoverageOverlap, e.overlapText = &v, formatNumber(v)
 	}
-	return false
+	if f.CofailureSupport > 0 {
+		v := f.CofailureRate
+		e.CofailureRate, e.cofailureText = &v, formatNumber(v)
+	}
 }
 
 // text is the human-readable report.
@@ -176,6 +241,8 @@ func (e explanation) text() string {
 		}
 		fmt.Fprintf(&b, "features: %s\n", strings.Join(parts, " "))
 	}
+	fmt.Fprintf(&b, "coverage overlap: %s\n", e.overlapText)
+	fmt.Fprintf(&b, "cofailure rate: %s\n", e.cofailureText)
 	fmt.Fprintf(&b, "coverage state: %s\n", e.CoverageState)
 	fmt.Fprintf(&b, "predictor probability: %s\n", e.PredictorProbability)
 	fmt.Fprintf(&b, "shard: %s\n", e.Shard)

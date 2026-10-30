@@ -71,7 +71,7 @@ func TestExplainTextForEachKindOfTest(t *testing.T) {
 	}{
 		{"certain", goA, []string{
 			"test: " + goA, "in inventory: yes", "hops: 0", "l1: certain (direct)", "coverage state: not_requested",
-			"predictor probability: n/a (no predictor in M3)", "shard: n/a", "lambda: n/a (no lock)", "decision: full suite: no_lock",
+			"predictor probability: n/a (a CERTAIN test is not scored)", "shard: n/a", "lambda: n/a (no verified lock)", "decision: full suite: no_lock",
 		}},
 		{"candidate", goC, []string{
 			"in inventory: yes", "hops: 2", "l1: candidate (rank 0.1250)", "features: hops=2 reachable=1 ", "lines_added=3", "kind_source=1",
@@ -192,7 +192,7 @@ func TestExplainJSON(t *testing.T) {
 	}
 	if doc.Test != goC || doc.InInventory != "yes" || doc.Hops == nil || *doc.Hops != 2 || !doc.Reachable || doc.Rank == nil || *doc.Rank != 0.125 ||
 		doc.Features["hops"] != 2 || doc.Features["lines_added"] != 3 || doc.CoverageState != "not_requested" ||
-		doc.PredictorProbability != "n/a (no predictor in M3)" || doc.Shard != "n/a" || doc.Lambda != "n/a (no lock)" || doc.Decision != "full suite: no_lock" || !strings.HasPrefix(doc.L1, "candidate") {
+		doc.PredictorProbability != "n/a (the predictor was not asked)" || doc.Shard != "n/a" || doc.Lambda != "n/a (no verified lock)" || doc.Decision != "full suite: no_lock" || !strings.HasPrefix(doc.L1, "candidate") {
 		t.Errorf("doc = %+v", doc)
 	}
 	f2 := &fakeSelect{d: explainDecision()}
