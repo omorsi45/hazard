@@ -286,6 +286,7 @@ func TestReplaySelectMatchesChangeExtract(t *testing.T) {
 	want, err := change.Extract(ctx, r.Dir(), change.Options{
 		Base: base, Head: head, DefaultBranch: cfg.Repo.DefaultBranch,
 		FullSuiteTriggers: cfg.Repo.FullSuiteTriggers, GeneratedGlobs: cfg.Repo.GeneratedGlobs,
+		HunkText: true, // the engine always keeps the hunk text
 	})
 	if err != nil {
 		t.Fatal(err)

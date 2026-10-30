@@ -1,8 +1,8 @@
 // Package engine runs the selection pipeline shared by the select, run and
 // explain commands: configuration, change extraction, index loading and
-// staleness, L1, and a controller placeholder. Every failure or unknown
-// degrades to a full-suite Decision; an error is returned only for an invalid
-// invocation or a canceled context.
+// staleness, L1, and the controller (lock, predictor, drift and the decision).
+// Every failure or unknown degrades to a full-suite Decision; an error is
+// returned only for an invalid invocation or a canceled context.
 package engine
 
 import (
@@ -18,8 +18,10 @@ import (
 
 	"github.com/omorsi45/hazard/internal/change"
 	"github.com/omorsi45/hazard/internal/config"
+	"github.com/omorsi45/hazard/internal/control"
 	"github.com/omorsi45/hazard/internal/impact"
 	"github.com/omorsi45/hazard/internal/index"
+	"github.com/omorsi45/hazard/internal/predict"
 )
 
 // ErrInvalidRef marks an explicit Base or Head that does not resolve to a
@@ -30,9 +32,18 @@ var ErrInvalidRef = errors.New("invalid ref")
 // invalid. The CLI maps it to a usage error.
 var ErrInvalidConfig = errors.New("invalid config")
 
-// Options is one selection request. Predictor, BudgetMS, BudgetUSD, Redact,
-// Recall and Explain are accepted for the callers that will use them once the
-// predictor and controller exist; the M3 pipeline does not read them.
+// ErrRecallOverride marks a request for a recall other than the lock's. The
+// threshold of a lock is certified for the recall it was calibrated for, so
+// another recall needs a new calibration. The CLI maps it to a usage error.
+var ErrRecallOverride = errors.New("recall override is not supported without recalibration")
+
+// Options is one selection request. Predictor, MaxCandidates, BudgetMS,
+// BudgetUSD and Redact override the lock's predictor, the candidate cap, the
+// time budget (5000 ms when zero), the spend cap and the redaction level; a cap
+// or a redaction level that differs from the configuration voids a lock
+// calibrated without it (policy_mismatch). Recall must be zero: a recall
+// override is refused with ErrRecallOverride. Explain is accepted for the callers
+// that read the scores, and changes nothing.
 type Options struct {
 	RepoDir, Base, Head, ConfigPath, LockPath, Predictor string // RepoDir is required and absolute
 	MaxCandidates, BudgetMS                              int
@@ -42,6 +53,9 @@ type Options struct {
 	Recall                                               float64 // 0 = from lock
 	Mode                                                 impact.Mode
 	ModeSet                                              bool // false: coverage mode when the index has coverage, else graph mode
+
+	// load replaces LoadPredictor in a test; nil means LoadPredictor.
+	load func(repoDir string, cfg config.Config, kind string) (predict.Predictor, control.Identity, error)
 }
 
 // Selected is one test in a selection. Package and RunnerID come from the
@@ -65,6 +79,7 @@ type Decision struct {
 	Change               *change.ChangeSet
 	L1                   *impact.Result
 	Warnings             []string
+	Scores               []TestScore // what the predictor said about each residual candidate, in TestID order; nil when none was asked
 	EstMSSelected        int
 	EstMSFull            int
 	OverheadMS           int
@@ -80,7 +95,6 @@ const (
 	reasonIndexStale   = "index_stale"
 	reasonHistory      = "history_error"
 	reasonNoLock       = "no_lock"
-	reasonLockUnsupp   = "lock_unsupported"
 	reasonLockError    = "lock_error"
 	reasonShadow       = "shadow"
 
@@ -102,11 +116,14 @@ func Select(ctx context.Context, opts Options) (Decision, error) {
 	if !filepath.IsAbs(opts.RepoDir) {
 		return Decision{}, fmt.Errorf("engine: RepoDir %q must be an absolute path", opts.RepoDir)
 	}
+	if opts.Recall != 0 {
+		return Decision{}, ErrRecallOverride
+	}
 	id, err := newID()
 	if err != nil {
 		return Decision{}, err
 	}
-	d, err := pipeline(ctx, opts)
+	d, err := pipeline(ctx, opts, start)
 	if err != nil {
 		return Decision{}, err
 	}
@@ -117,7 +134,7 @@ func Select(ctx context.Context, opts Options) (Decision, error) {
 	if opts.Shadow {
 		applyShadow(&d)
 	}
-	if opts.DryRunPayload {
+	if opts.DryRunPayload && d.Payload == nil {
 		d.Payload = []byte(emptyPayload)
 		d.Warnings = append(d.Warnings, noPredictorMsg)
 	}
@@ -154,10 +171,10 @@ func applyShadow(d *Decision) {
 	d.Tests = nil
 }
 
-// pipeline runs configuration, extraction, index, L1 and the controller
-// placeholder. It returns an error only for an invalid invocation or a
-// canceled context.
-func pipeline(ctx context.Context, opts Options) (d Decision, err error) {
+// pipeline runs configuration, extraction, index, L1 and the controller. It
+// returns an error only for an invalid invocation or a canceled context. start
+// is when Select began, which the time budget counts from.
+func pipeline(ctx context.Context, opts Options, start time.Time) (d Decision, err error) {
 	cfg, err := loadConfig(opts)
 	if err != nil {
 		return d, err
@@ -172,6 +189,10 @@ func pipeline(ctx context.Context, opts Options) (d Decision, err error) {
 		DefaultBranch:     cfg.Repo.DefaultBranch,
 		FullSuiteTriggers: cfg.Repo.FullSuiteTriggers,
 		GeneratedGlobs:    cfg.Repo.GeneratedGlobs,
+		// The local structure summary reads the token classes of the hunks. The
+		// text stays in memory: internal/redact decides what leaves the
+		// machine, and the decision's JSON never carries it.
+		HunkText: true,
 	})
 	switch {
 	case ctx.Err() != nil:
@@ -282,10 +303,9 @@ func pipeline(ctx context.Context, opts Options) (d Decision, err error) {
 	}
 	d.Hypothetical = hypothetical(res, mi, always)
 
-	selected := d.Hypothetical
-	controller(&d, controllerLockPath(opts))
-	if !d.FullSuite {
-		d.Tests = selected
+	st := stage{opts: opts, cfg: effectiveConfig(cfg, opts), start: start, cs: cs, m: mi, res: res, always: always}
+	if err := st.run(ctx, &d); err != nil {
+		return d, err
 	}
 	return d, nil
 }
@@ -394,7 +414,8 @@ func hypothetical(res *impact.Result, m *index.Manifest, always map[string]strin
 	return out
 }
 
-// controllerLockPath is the lock file the placeholder looks for.
+// controllerLockPath is the lock file the controller reads: Options.LockPath,
+// relative to the repository when it is not absolute, else hazard.lock in it.
 func controllerLockPath(opts Options) string {
 	switch {
 	case opts.LockPath == "":
@@ -403,19 +424,4 @@ func controllerLockPath(opts Options) string {
 		return opts.LockPath
 	}
 	return filepath.Join(opts.RepoDir, opts.LockPath)
-}
-
-// controller is the M3 placeholder for the M6 controller: without a valid,
-// verified lock there is no calibrated threshold, so the decision is always
-// the full suite. A lock file is not yet understood, so it is not trusted.
-func controller(d *Decision, lockPath string) {
-	_, err := os.Stat(lockPath)
-	switch {
-	case err == nil:
-		d.full(reasonLockUnsupp, "a lock file exists but this version cannot verify it: "+lockPath)
-	case errors.Is(err, fs.ErrNotExist):
-		d.full(reasonNoLock)
-	default:
-		d.full(reasonLockError, "lock file could not be inspected: "+err.Error())
-	}
 }

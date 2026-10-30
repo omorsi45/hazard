@@ -58,7 +58,7 @@ func TestSelectCoreChange(t *testing.T) {
 			t.Errorf("inventory fields = %q, %q", h.Package, h.RunnerID)
 		}
 		if !d.FullSuite || !d.Abstained || d.AbstainReason != "no_lock" {
-			t.Errorf("FullSuite %v Abstained %v reason %q, want the no_lock placeholder", d.FullSuite, d.Abstained, d.AbstainReason)
+			t.Errorf("FullSuite %v Abstained %v reason %q, want no_lock", d.FullSuite, d.Abstained, d.AbstainReason)
 		}
 		if len(d.Tests) != 0 {
 			t.Errorf("Tests = %v, want none while FullSuite", ids(d.Tests))
@@ -174,7 +174,7 @@ func TestSelectCoreChange(t *testing.T) {
 		}
 	})
 
-	t.Run("the lock placeholder", func(t *testing.T) {
+	t.Run("a lock file that is not a lock", func(t *testing.T) {
 		elsewhere := filepath.Join(t.TempDir(), "x.lock")
 		if d := selectOK(t, Options{RepoDir: f.dir, LockPath: elsewhere}); d.AbstainReason != "no_lock" {
 			t.Errorf("missing explicit lock: reason %q, want no_lock", d.AbstainReason)
@@ -183,15 +183,15 @@ func TestSelectCoreChange(t *testing.T) {
 			t.Fatal(err)
 		}
 		d := selectOK(t, Options{RepoDir: f.dir, LockPath: elsewhere})
-		if !d.FullSuite || d.AbstainReason != "lock_unsupported" || len(d.Tests) != 0 {
-			t.Errorf("explicit lock: FullSuite %v reason %q tests %v, want lock_unsupported", d.FullSuite, d.AbstainReason, ids(d.Tests))
+		if !d.FullSuite || d.AbstainReason != "lock_corrupt" || len(d.Tests) != 0 {
+			t.Errorf("explicit lock: FullSuite %v reason %q tests %v, want lock_corrupt", d.FullSuite, d.AbstainReason, ids(d.Tests))
 		}
 		if len(d.Hypothetical) != 4 {
 			t.Errorf("Hypothetical = %v, want the narrowed set kept", ids(d.Hypothetical))
 		}
 		f.write(t, map[string]string{"hazard.lock": "{}"})
-		if d := selectOK(t, Options{RepoDir: f.dir}); d.AbstainReason != "lock_unsupported" {
-			t.Errorf("default lock location: reason %q, want lock_unsupported", d.AbstainReason)
+		if d := selectOK(t, Options{RepoDir: f.dir}); d.AbstainReason != "lock_corrupt" {
+			t.Errorf("default lock location: reason %q, want lock_corrupt", d.AbstainReason)
 		}
 	})
 }

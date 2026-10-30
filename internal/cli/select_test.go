@@ -591,8 +591,9 @@ func TestSelectEndToEnd(t *testing.T) {
 			t.Errorf("code=%d out=%q err=%q", code, out, errOut)
 		}
 	})
-	t.Run("a confirmed recall override is accepted", func(t *testing.T) {
-		if code, out, errOut := invoke(ctx, "select", "--recall", "0.9", "--i-know-what-im-doing"); code != 0 || out != wantText {
+	t.Run("a confirmed recall override is refused until the lock is recalibrated", func(t *testing.T) {
+		code, out, errOut := invoke(ctx, "select", "--recall", "0.9", "--i-know-what-im-doing")
+		if code != 2 || out != "" || !strings.Contains(errOut, "recall override is not supported without recalibration") {
 			t.Errorf("code=%d out=%q err=%q", code, out, errOut)
 		}
 	})

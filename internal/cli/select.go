@@ -180,7 +180,7 @@ func (r selectRequest) engineOptions(root string) engine.Options {
 
 // mapEngineError turns invalid-invocation errors into usage errors.
 func mapEngineError(err error) error {
-	if errors.Is(err, engine.ErrInvalidRef) || errors.Is(err, engine.ErrInvalidConfig) {
+	if errors.Is(err, engine.ErrInvalidRef) || errors.Is(err, engine.ErrInvalidConfig) || errors.Is(err, engine.ErrRecallOverride) {
 		return usageError{err}
 	}
 	return err

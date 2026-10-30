@@ -22,7 +22,7 @@ func TestSelectEditAfterIndexingIsNotStale(t *testing.T) {
 	d := selectOK(t, Options{RepoDir: f.dir})
 
 	if d.AbstainReason != "no_lock" {
-		t.Fatalf("reason %q warnings %v, want the index to be usable (no_lock placeholder)", d.AbstainReason, d.Warnings)
+		t.Fatalf("reason %q warnings %v, want the index to be usable (no lock)", d.AbstainReason, d.Warnings)
 	}
 	if !sameStrings(ids(d.Hypothetical), coreChangeSet) {
 		t.Errorf("Hypothetical = %v, want the dependents of core %v", ids(d.Hypothetical), coreChangeSet)
