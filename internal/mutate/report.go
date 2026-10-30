@@ -161,6 +161,57 @@ func (w *jsonlWriter) Close() error {
 	return w.partial.Close()
 }
 
+// baselinePath is where Run publishes the baseline durations that belong to
+// the JSONL file at out.
+func baselinePath(out string) string { return out + ".baseline.json" }
+
+// baselineFile is the content of <out>.baseline.json. encoding/json writes the
+// keys of Tests in sorted order.
+type baselineFile struct {
+	BaseSHA string           `json:"base_sha"`
+	Tests   map[string]int64 `json:"tests"`
+}
+
+// writeBaseline publishes the per-test baseline durations (milliseconds) of
+// the run on baseSHA next to the JSONL file at out: it writes a temporary file,
+// syncs it and renames it onto the final path, so a reader never sees a partial
+// file and a failed write leaves the previous file whole.
+func writeBaseline(out, baseSHA string, tests map[string]int64) (err error) {
+	if tests == nil {
+		tests = map[string]int64{}
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(baselineFile{BaseSHA: baseSHA, Tests: tests}); err != nil {
+		return fmt.Errorf("mutate: encode the baseline durations: %w", err)
+	}
+	final := baselinePath(out)
+	tmp := final + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("mutate: create %s: %w", tmp, err)
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, os.Remove(tmp))
+		}
+	}()
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		return errors.Join(fmt.Errorf("mutate: write %s: %w", tmp, err), f.Close())
+	}
+	if err := f.Sync(); err != nil {
+		return errors.Join(fmt.Errorf("mutate: sync %s: %w", tmp, err), f.Close())
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("mutate: close %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		return fmt.Errorf("mutate: publish %s: %w", final, err)
+	}
+	return nil
+}
+
 // persistMutants upserts mutants and their kills in one transaction. An
 // unconfirmed mutant is not a label and is never stored; the schema forbids
 // that status.

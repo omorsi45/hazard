@@ -25,7 +25,8 @@ const mutateLong = `Generate mutation labels: apply small source changes (mutant
 Side effects: mutate builds and runs the test suite many times in temporary copies
 of the repository at --base. It first runs the whole suite twice and refuses to
 continue unless both runs pass. Every mutant is then built and tested in a copy;
-the working tree is never modified. Only --out and the database
+the working tree is never modified. Only --out, the per-test baseline durations
+next to it (<out>.baseline.json) and the database
 .hazard/hazard.db in the repository root are written. A relative --out is
 resolved against the repository root.
 
@@ -102,7 +103,7 @@ func newMutateCommand(run mutateRunFunc) *cobra.Command {
 		}
 		if jsonMode {
 			sum.Records = nil
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(sum)
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(mutateJSON{Summary: sum, BaselineTests: len(sum.BaselineMS)})
 		}
 		_, err = fmt.Fprint(cmd.OutOrStdout(), mutateText(sum, opts))
 		return err
@@ -118,6 +119,16 @@ func newMutateCommand(run mutateRunFunc) *cobra.Command {
 	f.StringVar(&packages, "packages", "", "go package patterns, comma separated (default: languages.go.packages from the config)")
 	f.StringVar(&configPath, "config", "", "config path (default: hazard.yml, then .hazard/hazard.yml)")
 	return cmd
+}
+
+// mutateJSON is the --json output: the summary without its records and without
+// the per-test baseline, which can be large, plus the number of baseline tests.
+type mutateJSON struct {
+	mutate.Summary
+	// BaselineMS hides the embedded map of the same JSON name: a field at the
+	// shallower depth wins, and this one is never set, so it is always omitted.
+	BaselineMS    json.RawMessage `json:"baseline_ms,omitempty"`
+	BaselineTests int             `json:"baseline_tests"`
 }
 
 // parseList splits a comma separated flag value. Whitespace around an element
@@ -148,6 +159,7 @@ func mutateText(s mutate.Summary, opts mutate.Options) string {
 	fmt.Fprintf(&b, "operators: %s\n", strings.Join(perOperator, " "))
 	fmt.Fprintf(&b, "reachability: unreachable_mutants=%d fully_unreachable_mutants=%d beyond_max_hops_mutants=%d\n",
 		s.UnreachableMutants, s.FullyUnreachableMutants, s.BeyondMaxHopsMutants)
+	fmt.Fprintf(&b, "baseline_tests: %d\n", len(s.BaselineMS))
 	if opts.Out != "" {
 		fmt.Fprintf(&b, "output: %s\n", opts.Out)
 	}

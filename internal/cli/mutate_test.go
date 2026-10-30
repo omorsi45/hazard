@@ -227,6 +227,7 @@ func fixtureMutateSummary() mutate.Summary {
 		ByOperator: map[string]int{"cmp": 5, "ret": 4, "cfg": 2},
 		Usable:     4, UnreachableMutants: 3, FullyUnreachableMutants: 2, BeyondMaxHopsMutants: 1,
 		BaselineSeconds: 12.5,
+		BaselineMS:      map[string]int64{"go:m/a:TestSecretA": 12, "go:m/b:TestSecretB": 3400, "go:m/c:TestSecretC": 0},
 		Records:         []mutate.Record{{ID: "r1-secret-record", Status: "killed"}},
 	}
 }
@@ -243,6 +244,7 @@ func TestMutateTextSummaryPrintsEveryCount(t *testing.T) {
 		"killed=4", "survived=3", "build_error=2", "timeout=1", "unconfirmed=1",
 		"cfg=2", "cmp=5", "ret=4",
 		"unreachable_mutants=3", "fully_unreachable_mutants=2", "beyond_max_hops_mutants=1",
+		"baseline_tests: 3\n",
 		"output: " + rec.opts.Out, "database: " + rec.opts.DBPath,
 	} {
 		if !strings.Contains(out, want) {
@@ -252,10 +254,16 @@ func TestMutateTextSummaryPrintsEveryCount(t *testing.T) {
 	if strings.Contains(out, "r1-secret-record") {
 		t.Errorf("the text summary lists the records:\n%s", out)
 	}
+	// Only the count of baseline tests is printed: the map can be large.
+	for _, leaked := range []string{"TestSecret", "3400"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("the text summary lists the baseline durations (%q):\n%s", leaked, out)
+		}
+	}
 
 	// A status that did not occur is still printed, as zero.
 	rec = &mutateRecorder{sum: mutate.Summary{BaseSHA: "abc", ByStatus: map[string]int{"survived": 1}, ByOperator: map[string]int{"cmp": 1}}}
-	if code, out, errOut = runMutate(context.Background(), rec.run); code != 0 || !strings.Contains(out, "killed=0") || !strings.Contains(out, "timeout=0") {
+	if code, out, errOut = runMutate(context.Background(), rec.run); code != 0 || !strings.Contains(out, "killed=0") || !strings.Contains(out, "timeout=0") || !strings.Contains(out, "baseline_tests: 0\n") {
 		t.Errorf("code=%d err=%q, want zero counts printed:\n%s", code, errOut, out)
 	}
 }
@@ -277,14 +285,33 @@ func TestMutateJSONSummaryOmitsRecords(t *testing.T) {
 	if _, ok := got["records"]; ok {
 		t.Errorf("the JSON summary carries the records: %s", out)
 	}
+	// The per-test baseline can be large: only its count is part of the output.
+	if _, ok := got["baseline_ms"]; ok || strings.Contains(out, "TestSecret") {
+		t.Errorf("the JSON summary carries the baseline durations: %s", out)
+	}
 	want := map[string]any{
 		"base_sha": "abc123def", "candidates": 17.0, "executed": 11.0, "usable": 4.0,
 		"unreachable_mutants": 3.0, "fully_unreachable_mutants": 2.0, "beyond_max_hops_mutants": 1.0, "baseline_seconds": 12.5,
-		"by_status":   map[string]any{"killed": 4.0, "survived": 3.0, "build_error": 2.0, "timeout": 1.0, "unconfirmed": 1.0},
-		"by_operator": map[string]any{"cmp": 5.0, "ret": 4.0, "cfg": 2.0},
+		"baseline_tests": 3.0,
+		"by_status":      map[string]any{"killed": 4.0, "survived": 3.0, "build_error": 2.0, "timeout": 1.0, "unconfirmed": 1.0},
+		"by_operator":    map[string]any{"cmp": 5.0, "ret": 4.0, "cfg": 2.0},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("JSON summary = %v\nwant          %v", got, want)
+	}
+
+	// A run without baseline tests says so with a zero, never by omission.
+	empty := &mutateRecorder{sum: mutate.Summary{BaseSHA: "abc"}}
+	code, out, errOut = runMutate(context.Background(), empty.run, "--json")
+	var zero map[string]any
+	if err := json.Unmarshal([]byte(out), &zero); err != nil || code != 0 || errOut != "" {
+		t.Fatalf("code=%d err=%q out=%q: %v", code, errOut, out, err)
+	}
+	if n, ok := zero["baseline_tests"]; !ok || n != 0.0 {
+		t.Errorf("baseline_tests = %v (present %t), want 0: %s", n, ok, out)
+	}
+	if _, ok := zero["baseline_ms"]; ok {
+		t.Errorf("the JSON summary carries baseline_ms: %s", out)
 	}
 }
 
@@ -308,6 +335,7 @@ func TestMutateHelpStatesWhatItRuns(t *testing.T) {
 	}
 	for _, phrase := range []string{
 		"builds and runs the test suite many times in temporary copies",
+		"<out>.baseline.json",
 		"--base", "--files", "--n", "--operators", "--timeout", "--concurrency", "--out", "--packages", "--config",
 	} {
 		if !strings.Contains(out, phrase) {
