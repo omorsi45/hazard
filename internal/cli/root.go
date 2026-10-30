@@ -69,16 +69,7 @@ func NewRoot() *cobra.Command {
 	root.AddCommand(newMutateCommand(mutate.Run))
 	root.AddCommand(newTrainCommand())
 
-	calibrate := leaf("calibrate", "Calibrate selection risk")
-	calibrate.Flags().Float64("alpha", 0.01, "target miss rate")
-	calibrate.Flags().Float64("delta", 0.05, "error probability")
-	calibrate.Flags().String("split", "temporal", "split method")
-	calibrate.Flags().String("split-at", "", "temporal split point")
-	calibrate.Flags().String("predictor", "ensemble", "predictor")
-	calibrate.Flags().String("grid", "0.005:0.500:0.005", "threshold grid")
-	calibrate.Flags().String("unit", "commit", "calibration unit")
-	calibrate.Flags().String("out", "hazard.lock", "lock output path")
-	root.AddCommand(calibrate)
+	root.AddCommand(newCalibrateCommand())
 
 	eval := leaf("eval", "Evaluate selectors")
 	eval.Flags().String("split", "temporal", "split method")
