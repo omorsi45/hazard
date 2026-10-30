@@ -1560,28 +1560,96 @@ func TestRunRefusesRedBaseline(t *testing.T) {
 	guard.finish(t)
 }
 
+// blockTestSource is the test file that holds a baseline run. TestBlock records
+// that it started in the first path, then waits for as long as the second path
+// exists. The wait is bounded, so a driver that fails to stop the go command
+// ends the run with a red baseline instead of hanging the package.
+const blockTestSource = `package calc
+
+import (
+	"os"
+	"testing"
+	"time"
+)
+
+func TestBlock(t *testing.T) {
+	if err := os.WriteFile(%q, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for end := time.Now().Add(time.Minute); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(%q); err != nil {
+			return
+		}
+	}
+	t.Fatal("TestBlock was never released")
+}
+`
+
+// waitForFile reports whether path exists before stop is closed or limit passes.
+func waitForFile(stop <-chan struct{}, path string, limit time.Duration) bool {
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	timeout := time.NewTimer(limit)
+	defer timeout.Stop()
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+		select {
+		case <-stop:
+			return false
+		case <-timeout.C:
+			return false
+		case <-tick.C:
+		}
+	}
+}
+
 // Cancelling while the first baseline run is in progress ends the go command,
 // removes the slots and leaves the repository and the output paths untouched.
+// The fixture has a test that cannot end while the hold file exists, so the
+// first baseline go test is running for as long as the test needs: it cancels
+// once that test has reported that it started, on a host of any speed.
 func TestRunCanceledDuringTheBaselineLeavesNothingBehind(t *testing.T) {
-	repo := sharedRepo(t)
+	ctl := t.TempDir()
+	started, hold := filepath.Join(ctl, "started"), filepath.Join(ctl, "hold")
+	if err := os.WriteFile(hold, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	files := calcFixture("", "fix")
+	files["calc/block_test.go"] = fmt.Sprintf(blockTestSource, started, hold)
+	repo := newRepo(t, files)
 	opts := fixtureOptions(repo, t.TempDir(), []string{"calc/fix.go"}, []string{"cmp"})
 	opts.Packages = []string{"./calc"}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	guard := newRunGuard(t, repo)
-	guard.onLine = func(line string) {
-		if strings.Contains(line, "baseline run 1 of 2 starting") {
-			time.AfterFunc(time.Second, cancel)
-		}
-	}
 	opts.Log = guard
+
+	done := make(chan struct{})
+	reached := make(chan bool, 1)
+	go func() {
+		reached <- waitForFile(done, started, 5*time.Minute)
+		cancel()
+	}()
 	_, err := Run(ctx, opts)
+	close(done)
+	// A go test killed on a Unix host leaves its test binary running: release it.
+	if rmErr := os.Remove(hold); rmErr != nil {
+		t.Errorf("release TestBlock: %v", rmErr)
+	}
+	if !<-reached {
+		t.Error("the first baseline run never reached TestBlock, so nothing was canceled while it ran")
+	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run error = %v, want context.Canceled", err)
 	}
 	guard.finish(t)
 	if guard.applied != 0 {
 		t.Errorf("applied %d mutants before the baseline finished", guard.applied)
+	}
+	if log := guard.logText(); strings.Contains(log, "baseline run 1 of 2 passed") {
+		t.Errorf("the first baseline run finished before the cancel; log:\n%s", log)
 	}
 	requireNoOutputs(t, opts)
 }
