@@ -41,9 +41,7 @@ func TestHelpTreeAndVersion(t *testing.T) {
 }
 
 func TestDocumentedFlagsParse(t *testing.T) {
-	cases := [][]string{
-		{"eval", "--split", "temporal", "--split-at", "2026-06-01", "--predictors", "static,logistic", "--baselines", "all,l1-only", "--out", "report"},
-	}
+	cases := [][]string{}
 	for _, args := range cases {
 		t.Run(strings.Join(args[:min(len(args), 2)], "_"), func(t *testing.T) {
 			code, _, errOut := invoke(context.Background(), args...)
@@ -61,7 +59,9 @@ func TestUsageAndJSONErrors(t *testing.T) {
 			t.Errorf("%v returned %d, want 2", args, code)
 		}
 	}
-	code, out, errOut := invoke(context.Background(), "eval", "--json")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	code, out, errOut := invoke(canceled, "eval", "--json")
 	if code != 70 || out != "" {
 		t.Fatalf("JSON leaf code=%d stdout=%q stderr=%q", code, out, errOut)
 	}

@@ -76,6 +76,7 @@ type Report struct {
 	Synthetic *Synthetic `json:"synthetic,omitempty"`
 	Real      *Real      `json:"real,omitempty"`
 	Files     Files      `json:"files"`
+	Warnings  []string   `json:"warnings,omitempty"`
 }
 
 // column is one metric column of the ablation tables.
@@ -311,6 +312,11 @@ func (r Report) WriteText(w io.Writer) error {
 			return err
 		}
 		if err := textTable(w, ablationHead(), rowsOf(re.Rows), true); err != nil {
+			return err
+		}
+	}
+	for _, warning := range r.Warnings {
+		if _, err := fmt.Fprintf(w, "warning: %s\n", warning); err != nil {
 			return err
 		}
 	}
@@ -565,6 +571,9 @@ func (r Report) provenance() []htmlKV {
 			kv = append(kv, htmlKV{fmt.Sprintf("mutants %s / %s", c.Partition, c.Status), strconv.Itoa(c.N)})
 		}
 		kv = append(kv, htmlKV{"scored pairs", s.PairsFile})
+	}
+	for _, warning := range r.Warnings {
+		kv = append(kv, htmlKV{"warning", warning})
 	}
 	if re := r.Real; re != nil {
 		l := re.Labels

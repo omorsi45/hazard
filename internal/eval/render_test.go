@@ -34,8 +34,8 @@ func sampleReport(t *testing.T) (Report, Built) {
 		Synthetic: &Synthetic{
 			Population: SyntheticLabel, MutationBase: "abc123", PMode: "coverage",
 			Observed: []Count{{Partition: "test", Status: "killed", N: 3}}, Skipped: map[string]int{"build_error": 1},
-			Events:    EventCounts{Tune: 3, TuneWithFailures: 3, Test: 3, TestWithFailures: 3, TestByKind: map[string]int{KindCfg: 1, KindGo: 2}, TrainNotRead: 7},
-			Rows:      built.Rows, Reliability: built.Reliability, PairsFile: FilePairs,
+			Events: EventCounts{Tune: 3, TuneWithFailures: 3, Test: 3, TestWithFailures: 3, TestByKind: map[string]int{KindCfg: 1, KindGo: 2}, TrainNotRead: 7},
+			Rows:   built.Rows, Reliability: built.Reliability, PairsFile: FilePairs,
 		},
 		Real:  &real,
 		Files: Files{Report: FileReport, Pairs: FilePairs, HTML: FileHTML, Reliability: FileReliability},
@@ -265,4 +265,22 @@ func between(s, start, end string) string {
 		s = s[:j+len(end)]
 	}
 	return s
+}
+
+func TestWarningsAreShownInTheTextAndThePage(t *testing.T) {
+	rep, _ := sampleReport(t)
+	rep.Warnings = []string{"test durations were measured at aaa but the mutants were made at bbb"}
+	var buf bytes.Buffer
+	if err := rep.WriteText(&buf); err != nil {
+		t.Fatal(err)
+	}
+	page, err := rep.HTML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, out := range map[string]string{"text": buf.String(), "html": string(page)} {
+		if !strings.Contains(out, "measured at aaa but the mutants were made at bbb") {
+			t.Errorf("%s lacks the warning", name)
+		}
+	}
 }

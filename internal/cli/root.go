@@ -3,10 +3,8 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"math"
 	"strconv"
 	"strings"
 
@@ -22,8 +20,6 @@ import (
 
 const version = "0.1.0-dev"
 
-var errNotImplemented = errors.New("not implemented")
-
 type usageError struct{ cause error }
 
 func (e usageError) Error() string { return e.cause.Error() }
@@ -35,27 +31,6 @@ func NewRoot() *cobra.Command {
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err} })
 	root.PersistentFlags().Bool("json", false, "emit machine-readable output")
 	root.PersistentFlags().CountP("verbose", "v", "increase human output verbosity")
-
-	leaf := func(name, purpose string) *cobra.Command {
-		return &cobra.Command{
-			Use: name, Short: purpose + " (not implemented yet)",
-			RunE: func(cmd *cobra.Command, _ []string) error {
-				if cmd.Name() == "select" || cmd.Name() == "run" {
-					if cmd.Flags().Changed("recall") {
-						recall, _ := cmd.Flags().GetFloat64("recall")
-						confirmed, _ := cmd.Flags().GetBool("i-know-what-im-doing")
-						if !confirmed || math.IsNaN(recall) || math.IsInf(recall, 0) || recall <= 0 || recall >= 1 {
-							return usageError{fmt.Errorf("invalid --recall override: requires --i-know-what-im-doing and a value in (0,1)")}
-						}
-					}
-				}
-				if err := cmd.Context().Err(); err != nil {
-					return err
-				}
-				return fmt.Errorf("%s: %w", cmd.CommandPath(), errNotImplemented)
-			},
-		}
-	}
 
 	root.AddCommand(newSelectCommand(recordSelection(engine.Select)))
 
@@ -71,13 +46,7 @@ func NewRoot() *cobra.Command {
 
 	root.AddCommand(newCalibrateCommand())
 
-	eval := leaf("eval", "Evaluate selectors")
-	eval.Flags().String("split", "temporal", "split method")
-	eval.Flags().String("split-at", "", "temporal split point")
-	eval.Flags().String("predictors", "static,logistic,jev,ensemble", "predictors")
-	eval.Flags().String("baselines", "all,l1-only,l1-coverage", "baselines")
-	eval.Flags().String("out", ".hazard/report/", "report directory")
-	root.AddCommand(eval)
+	root.AddCommand(newEvalCommand())
 
 	root.AddCommand(newAuditCommand(nativeRunners()))
 

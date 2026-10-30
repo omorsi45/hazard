@@ -1,4 +1,4 @@
-.PHONY: check build test lint
+.PHONY: check build test lint eval
 
 check: build test lint
 
@@ -10,3 +10,6 @@ test:
 
 lint:
 	golangci-lint run
+
+eval:
+	go run ./cmd/hazard eval
