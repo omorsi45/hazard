@@ -65,8 +65,8 @@ orders the remaining units by ID, shuffles them with a generator fixed by --seed
 and calibrates on the first half.
 
 The requirement comes first: at least MinCalibrationN(alpha, delta) units are
-needed (299 at alpha 0.01 and delta 0.05). With fewer, calibrate reads nothing
-but the label build, prints
+needed (299 at alpha 0.01 and delta 0.05). With fewer, calibrate reads no
+predictor artifact and builds no index; it prints
 
   calibrate: refused: need n >= <need>, have <have>
 
