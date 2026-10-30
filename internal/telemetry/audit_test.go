@@ -504,3 +504,73 @@ func TestPersistWritesFieldMissesAndAuditLines(t *testing.T) {
 		}
 	}
 }
+
+// A selected Go test runs its subtests with it, so a failing subtest is not a
+// miss when its top-level test was selected. Only the top-level test is
+// selected, never a subtest alone (the runner widens a subtest to its parent).
+func TestAuditASelectedParentCoversItsFailingSubtests(t *testing.T) {
+	const (
+		parent = "go:example.com/m/p:TestC"
+		sub    = "go:example.com/m/p:TestC/case_one"
+		other  = "go:example.com/m/p:TestD/case_one"
+	)
+	g := linearHistory(2)
+	in := auditInput("c2", []string{parent, sub, other},
+		sel("selected-parent", "c2", time.Minute, parent),
+		sel("selected-nothing", "c2", 2*time.Minute, tA))
+	rep, err := Audit(context.Background(), in, g.deps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Selections) != 2 {
+		t.Fatalf("selections = %+v", rep.Selections)
+	}
+	if got := rep.Selections[0].Missed; !reflect.DeepEqual(got, []string{other}) {
+		t.Errorf("a selection of TestC missed %v, want only TestD/case_one: the subtest TestC/case_one ran with its parent", got)
+	}
+	if got := rep.Selections[1].Missed; !reflect.DeepEqual(got, []string{parent, sub, other}) {
+		t.Errorf("a selection without TestC or TestD missed %v, want all three", got)
+	}
+	if rep.Misses != 4 {
+		t.Errorf("misses = %d, want 1 + 3", rep.Misses)
+	}
+}
+
+// A selection whose commit no longer exists (rewritten history) cannot be
+// related to the full run; it must not stop the others from being bisected.
+func TestAuditBisectIgnoresASelectionOnAVanishedCommit(t *testing.T) {
+	g := linearHistory(5)
+	g.firstBad[tB] = "c3"
+	deps := g.deps()
+	isAncestor := deps.IsAncestor
+	asked := map[string]int{}
+	deps.IsAncestor = func(ctx context.Context, a, b string) (bool, error) {
+		asked[a]++
+		if a == "ghost" {
+			return false, errors.New("bad object ghost")
+		}
+		return isAncestor(ctx, a, b)
+	}
+	in := auditInput("c5", []string{tB},
+		sel("gone", "ghost", time.Minute, tA),
+		sel("r3", "c3", 2*time.Minute, tA),
+		sel("r3b", "c3", 3*time.Minute, tA))
+	in.Bisect = true
+	rep, err := Audit(context.Background(), in, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, m := range rep.MissList {
+		got = append(got, m.SelectionID)
+	}
+	if !reflect.DeepEqual(got, []string{"r3", "r3b"}) {
+		t.Errorf("misses for %v, want r3 and r3b", got)
+	}
+	if len(rep.Warnings) != 1 || !strings.Contains(rep.Warnings[0], "ghost") {
+		t.Errorf("warnings = %v, want one naming the commit that could not be related", rep.Warnings)
+	}
+	if asked["c3"] != 1 {
+		t.Errorf("IsAncestor was asked about c3 %d times, want once per commit", asked["c3"])
+	}
+}

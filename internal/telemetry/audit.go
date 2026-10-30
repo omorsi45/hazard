@@ -183,7 +183,7 @@ func Audit(ctx context.Context, in AuditInput, deps AuditDeps) (Report, error) {
 		members := memberSet(r)
 		missed := []string{}
 		for _, t := range failing {
-			if !members[t] {
+			if !covers(members, t) {
 				missed = append(missed, t)
 				rep.MissList = append(rep.MissList, newMiss(r.ID, t, at, in.FullRunID, in.Commit+".."+in.Commit))
 			}
@@ -233,6 +233,25 @@ func memberSet(r Record) map[string]bool {
 	return set
 }
 
+// covers reports whether a selection with the given members ran the test id:
+// the test itself, or for a Go subtest ("go:pkg:Parent/sub") its top-level test,
+// which the runner always runs whole.
+func covers(members map[string]bool, id string) bool {
+	if members[id] {
+		return true
+	}
+	pkg, ok := strings.CutPrefix(id, "go:")
+	if !ok {
+		return false
+	}
+	pkgPath, name, ok := strings.Cut(pkg, ":")
+	if !ok {
+		return false
+	}
+	parent, _, hasSub := strings.Cut(name, "/")
+	return hasSub && members["go:"+pkgPath+":"+parent]
+}
+
 // newMiss builds an attributed miss with an ID derived from what it says, so
 // auditing the same full run twice replaces rows instead of duplicating them.
 func newMiss(selectionID, testID, at, fullRunID, window string) Miss {
@@ -253,16 +272,23 @@ func bisectAll(ctx context.Context, in AuditInput, deps AuditDeps, picked []Reco
 		}
 	}
 	var eligible []Record
+	related := map[string]bool{} // commit -> an ancestor of the full-run commit; asked once per commit
+	checked := map[string]bool{}
 	for _, r := range picked {
-		ok, err := deps.IsAncestor(ctx, r.Commit, in.Commit)
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
+		if !checked[r.Commit] {
+			checked[r.Commit] = true
+			ok, err := deps.IsAncestor(ctx, r.Commit, in.Commit)
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr
+			}
+			if err != nil {
+				// A commit that no longer exists (rewritten history) cannot be related
+				// to the full run; the other selections can still be bisected.
+				rep.Warnings = append(rep.Warnings, fmt.Sprintf("cannot relate the selection on %s to the full-run commit: %v", r.Commit, err))
+			}
+			related[r.Commit] = err == nil && ok
 		}
-		if err != nil {
-			skip(fmt.Sprintf("cannot relate the selection on %s to the full-run commit: %v", r.Commit, err))
-			return nil
-		}
-		if ok {
+		if related[r.Commit] {
 			eligible = append(eligible, r)
 		}
 	}
@@ -302,7 +328,7 @@ func bisectAll(ctx context.Context, in AuditInput, deps AuditDeps, picked []Reco
 		}
 		blamed := false
 		for _, r := range eligible {
-			if r.Commit == bad && !memberSet(r)[t] {
+			if r.Commit == bad && !covers(memberSet(r), t) {
 				rep.MissList = append(rep.MissList, newMiss(r.ID, t, at, in.FullRunID, blameWindow(good, bad)))
 				blamed = true
 			}
