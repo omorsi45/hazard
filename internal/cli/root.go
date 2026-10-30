@@ -74,6 +74,7 @@ func NewRoot() *cobra.Command {
 	root.AddCommand(newLabelsCommand(newLabelsBackend()))
 
 	root.AddCommand(newMutateCommand(mutate.Run))
+	root.AddCommand(newTrainCommand())
 
 	calibrate := leaf("calibrate", "Calibrate selection risk")
 	calibrate.Flags().Float64("alpha", 0.01, "target miss rate")
@@ -181,6 +182,10 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	var usage usageError
 	if errors.As(err, &usage) || findErr != nil {
 		code = 2
+	}
+	var exit exitError
+	if errors.As(err, &exit) {
+		code = exit.code
 	}
 	if jsonMode {
 		_ = json.NewEncoder(errOut).Encode(map[string]any{"error": err.Error(), "code": code})
