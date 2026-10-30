@@ -566,6 +566,43 @@ func TestTrainEndToEnd(t *testing.T) {
 		}
 	})
 
+	t.Run("a repository without a database is refused", func(t *testing.T) {
+		f.seed(t, f.standardRows(t))
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			if err := os.Remove(filepath.Join(f.dir, ".hazard", "hazard.db"+suffix)); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+		}
+		removeArtifacts(t, f.dir)
+		code, out, errOut := f.runTrain(t, "--before", "2026-01-02")
+		if code != 1 || !strings.Contains(out, "there is no database") || !strings.Contains(errOut, "refused") {
+			t.Errorf("code=%d, want 1 and a message about the database\nstdout %s\nstderr %s", code, out, errOut)
+		}
+		if _, err := os.Stat(filepath.Join(f.dir, ".hazard", "hazard.db")); !os.IsNotExist(err) {
+			t.Errorf("train created a database (%v)", err)
+		}
+	})
+
+	t.Run("verbose progress goes to stderr and the report to stdout", func(t *testing.T) {
+		f.seed(t, f.standardRows(t))
+		removeArtifacts(t, f.dir)
+		code, out, errOut := f.runTrain(t, "--before", "2026-01-02", "-v")
+		if code != 0 {
+			t.Fatalf("code=%d err=%q\n%s", code, errOut, out)
+		}
+		if want := "replaying 10 mutation events on " + f.base; !strings.Contains(errOut, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, errOut)
+		}
+		for _, want := range []string{"cutoff: 2026-01-02", "static: wrote", "logistic: wrote", "training: "} {
+			if !strings.Contains(out, want) {
+				t.Errorf("stdout lacks %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "replaying") {
+			t.Errorf("progress leaked into stdout:\n%s", out)
+		}
+	})
+
 	t.Run("a missing index is refused", func(t *testing.T) {
 		f.seed(t, f.standardRows(t))
 		manifest := filepath.Join(f.dir, ".hazard", "index", "manifest.json")
