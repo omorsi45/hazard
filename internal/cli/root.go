@@ -57,16 +57,9 @@ func NewRoot() *cobra.Command {
 		}
 	}
 
-	root.AddCommand(newSelectCommand(engine.Select))
+	root.AddCommand(newSelectCommand(recordSelection(engine.Select)))
 
-	run := leaf("run", "Select and run tests")
-	selectFlags(run)
-	run.Flags().String("runner", "auto", "auto|gotest|pytest")
-	run.Flags().String("junit", ".hazard/junit.xml", "JUnit output path")
-	run.Flags().Bool("full", false, "force full suite")
-	run.Flags().Bool("no-fallback", false, "return internal error without full-suite fallback")
-	run.Args = cobra.ArbitraryArgs
-	root.AddCommand(run)
+	root.AddCommand(newRunCommand(engine.Select, nativeRunners()))
 
 	root.AddCommand(newMineCommand(mine.Mine))
 	root.AddCommand(newIndexCommand(index.Build, index.Publish))
@@ -94,11 +87,7 @@ func NewRoot() *cobra.Command {
 	eval.Flags().String("out", ".hazard/report/", "report directory")
 	root.AddCommand(eval)
 
-	audit := leaf("audit", "Audit a selection against a full run")
-	audit.Flags().String("full-run", "", "full-run JUnit path")
-	audit.Flags().String("since-run", "", "selection ID or timestamp")
-	audit.Flags().Bool("bisect", false, "bisect suspected misses")
-	root.AddCommand(audit)
+	root.AddCommand(newAuditCommand(nativeRunners()))
 
 	root.AddCommand(newExplainCommand(engine.Select))
 
@@ -177,10 +166,9 @@ func Execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 	if err == nil {
 		return 0
 	}
-	code := 70
-	var usage usageError
-	if errors.As(err, &usage) || findErr != nil {
-		code = 2
+	code, silent := exitCodeOf(err, findErr != nil)
+	if silent {
+		return code
 	}
 	if jsonMode {
 		_ = json.NewEncoder(errOut).Encode(map[string]any{"error": err.Error(), "code": code})

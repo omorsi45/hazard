@@ -1,0 +1,55 @@
+# Hazard on GitLab CI.
+#
+# Merge requests run only the tests a change could break. The default branch and
+# scheduled pipelines run the whole suite and then audit what the selections
+# missed, so a miss is a delay and not an escape.
+#
+# GIT_DEPTH: 0 is required, not optional. Hazard needs the merge base, and a
+# shallow clone has none: Hazard then falls back to the full suite on every run.
+stages: [test]
+
+.hazard-base:
+  image: golang:1.26
+  variables:
+    GIT_DEPTH: 0
+  before_script:
+    - go install github.com/omorsi45/hazard/cmd/hazard@v0.1.0
+  cache:
+    key: "hazard-$CI_COMMIT_REF_SLUG"
+    paths: [.hazard/]
+
+selected-tests:
+  extends: .hazard-base
+  stage: test
+  variables:
+    GIT_DEPTH: 0
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - hazard run --base "$CI_MERGE_REQUEST_DIFF_BASE_SHA" --junit .hazard/junit.xml
+  artifacts:
+    when: always
+    reports:
+      junit: .hazard/junit.xml
+
+full-suite:
+  extends: .hazard-base
+  stage: test
+  variables:
+    GIT_DEPTH: 0
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  # The audit runs even when the full suite fails, which is when a miss shows;
+  # the job still fails with the suite's own exit code.
+  script:
+    - hazard run --full --junit .hazard/junit.xml || full_status=$?
+    - since="$(cat .hazard/last-audit 2>/dev/null || date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+    - hazard audit --full-run .hazard/junit.xml --since-run "$since" --bisect
+    - date -u +%Y-%m-%dT%H:%M:%SZ > .hazard/last-audit
+    - exit "${full_status:-0}"
+  artifacts:
+    when: always
+    paths: [.hazard/audits.jsonl]
+    reports:
+      junit: .hazard/junit.xml

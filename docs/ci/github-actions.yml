@@ -1,0 +1,99 @@
+# Hazard on GitHub Actions.
+#
+# Pull requests run only the tests a change could break. The default branch and
+# a nightly schedule run the whole suite and then audit what the selections
+# missed, so a miss is a delay and not an escape.
+#
+# fetch-depth: 0 is required, not optional. Hazard needs the merge base, and a
+# shallow clone has none: Hazard then falls back to the full suite on every run.
+#
+# Selections made in pull requests are recorded under .hazard. The Actions cache
+# is scoped to the ref that saved it, so the audit on the default branch sees
+# only the telemetry saved there; keep the telemetry file where the audit job can
+# read it if you want pull request selections audited.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * *" # audit.full_suite_schedule in hazard.yml
+
+permissions:
+  contents: read
+
+jobs:
+  selected:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - run: go install github.com/omorsi45/hazard/cmd/hazard@v0.1.0
+
+      - name: restore hazard state
+        uses: actions/cache@v4
+        with:
+          path: .hazard
+          key: hazard-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            hazard-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+            hazard-${{ runner.os }}-
+
+      - name: run selected tests
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: hazard run --base ${{ github.event.pull_request.base.sha }} --junit .hazard/junit.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hazard-junit
+          path: .hazard/junit.xml
+
+  full:
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - run: go install github.com/omorsi45/hazard/cmd/hazard@v0.1.0
+
+      - name: restore hazard state
+        uses: actions/cache@v4
+        with:
+          path: .hazard
+          key: hazard-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            hazard-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+            hazard-${{ runner.os }}-
+
+      - name: run the full suite
+        run: hazard run --full --junit .hazard/junit.xml
+
+      # Audit every selection recorded since the previous audit, also when the
+      # full suite failed: that is when a miss shows.
+      - name: audit the selections
+        if: always()
+        run: |
+          since="$(cat .hazard/last-audit 2>/dev/null || date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          hazard audit --full-run .hazard/junit.xml --since-run "$since" --bisect
+          echo "$now" > .hazard/last-audit
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hazard-junit-full
+          path: |
+            .hazard/junit.xml
+            .hazard/audits.jsonl

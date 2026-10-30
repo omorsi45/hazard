@@ -42,10 +42,8 @@ func TestHelpTreeAndVersion(t *testing.T) {
 
 func TestDocumentedFlagsParse(t *testing.T) {
 	cases := [][]string{
-		{"run", "--base", "main", "--runner", "gotest", "--junit", "junit.xml", "--full", "--no-fallback", "--", "-run", "TestOne"},
 		{"calibrate", "--alpha", "0.01", "--delta", "0.05", "--split", "temporal", "--split-at", "2026-06-01", "--predictor", "ensemble", "--grid", "0.005:0.500:0.005", "--unit", "commit", "--out", "hazard.lock"},
 		{"eval", "--split", "temporal", "--split-at", "2026-06-01", "--predictors", "static,logistic", "--baselines", "all,l1-only", "--out", "report"},
-		{"audit", "--full-run", "junit.xml", "--since-run", "id", "--bisect"},
 	}
 	for _, args := range cases {
 		t.Run(strings.Join(args[:min(len(args), 2)], "_"), func(t *testing.T) {
@@ -84,7 +82,7 @@ func TestUsageAndJSONErrors(t *testing.T) {
 func TestCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	for _, command := range []string{"select", "eval"} {
+	for _, command := range []string{"select", "eval", "run"} {
 		code, _, errOut := invoke(ctx, command)
 		if code != 70 || !strings.Contains(errOut, "canceled") {
 			t.Fatalf("%s canceled code=%d err=%q", command, code, errOut)
@@ -104,9 +102,11 @@ func TestRecallOverrideRequiresExplicitConfirmation(t *testing.T) {
 			t.Errorf("%v: code=%d, want 2", args, code)
 		}
 	}
-	code, _, _ := invoke(context.Background(), "run", "--recall", "0.9", "--i-know-what-im-doing")
-	if code != 70 {
-		t.Fatalf("confirmed override should reach scaffold leaf: %d", code)
+	// A confirmed override passes the usage gate and reaches the selector.
+	r := newRig(t, narrowedDecision())
+	code, _, errOut := r.run("--recall", "0.9", "--i-know-what-im-doing")
+	if code != 0 || r.sel.calls != 1 || r.sel.got.Recall != 0.9 {
+		t.Fatalf("confirmed override: code=%d err=%q Select calls=%d recall=%v", code, errOut, r.sel.calls, r.sel.got.Recall)
 	}
 }
 
@@ -160,7 +160,7 @@ func TestJSONUsageErrorsIndependentOfFlagOrder(t *testing.T) {
 	for _, args := range [][]string{
 		{"select", "--format", "--json", "--unknown"},
 		{"run", "--runner", "--json", "--unknown"},
-		{"run", "--", "--json"},
+		{"run", "--runner", "bogus", "--", "--json"},
 	} {
 		_, _, errOut := invoke(context.Background(), args...)
 		if strings.HasPrefix(errOut, "{") {
