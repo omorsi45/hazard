@@ -31,10 +31,15 @@ func replayFiles() map[string]string {
 	}
 }
 
-// newReplayRepo is a repository whose head commit marks run.sh executable.
+// newReplayRepo is a repository whose head commit marks run.sh executable. The
+// bit is set in the index and on disk: where git honors file modes, the
+// commit's git add -A restages the mode of the working-tree file.
 func newReplayRepo(t *testing.T) (dir, base string) {
 	t.Helper()
 	dir, _ = newRepo(t, replayFiles())
+	if err := os.Chmod(filepath.Join(dir, "run.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	gitIn(t, dir, "update-index", "--chmod=+x", "run.sh")
 	return dir, commitAt(t, dir, "mark run.sh executable", baseTime.Add(time.Hour))
 }
