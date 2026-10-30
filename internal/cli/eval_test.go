@@ -10,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/omorsi45/hazard/internal/config"
 	"github.com/omorsi45/hazard/internal/eval"
+	"github.com/omorsi45/hazard/internal/index"
 )
 
 // evalDoc is the part of report.json these tests read.
@@ -390,5 +392,60 @@ func TestMakefileHasAnEvalTarget(t *testing.T) {
 	}
 	if !phony || !recipe {
 		t.Errorf("Makefile: eval is phony=%v, runs hazard eval with its defaults=%v", phony, recipe)
+	}
+}
+
+func parseEvalDoc(t *testing.T, out string) evalDoc {
+	t.Helper()
+	var d evalDoc
+	if err := json.Unmarshal([]byte(out), &d); err != nil {
+		t.Fatalf("stdout is not the report: %v\n%.300s", err, out)
+	}
+	return d
+}
+
+// With coverage in the index, B2 is measured and the predictors score the
+// coverage layer.
+func TestEvalWithACoverageIndex(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "")
+	f := newTrainFixture(t)
+	f.seed(t, f.standardRows(t))
+	if code, out, errOut := f.runTrain(t, "--before", "2026-01-02", "--json"); code != 0 {
+		t.Fatalf("train: code=%d err=%q out=%s", code, errOut, out)
+	}
+	cfg, err := config.Load(filepath.Join(f.dir, "hazard.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := index.Build(context.Background(), f.dir, cfg, index.Options{Coverage: true})
+	if err != nil {
+		t.Fatalf("index.Build with coverage: %v", err)
+	}
+	if m.Coverage == nil || m.HeadSHA != f.base {
+		t.Fatalf("index = head %s coverage %v, want coverage at %s", m.HeadSHA, m.Coverage != nil, f.base)
+	}
+	if err := index.Publish(f.dir, m); err != nil {
+		t.Fatal(err)
+	}
+	f.writeDurations(t, ".hazard/mutants.jsonl.baseline.json", `{"base_sha":"`+f.base+`","tests":{"`+trainTestA+`":10,"`+trainTestB+`":30}}`)
+
+	code, out, errOut := f.runEval(t, "--bootstrap", "30", "--json", "--source", "mutation")
+	if code != 0 || errOut != "" {
+		t.Fatalf("code=%d err=%q out=%s", code, errOut, out)
+	}
+	d := parseEvalDoc(t, out)
+	if d.Synthetic == nil || d.Synthetic.PMode != "coverage" {
+		t.Fatalf("report = %+v, want the predictors to score the coverage layer", d.Synthetic)
+	}
+	if b2 := d.row(t, "B2"); b2.Status != "measured" || b2.Metrics["recall_commit"].Value == nil {
+		t.Errorf("B2 = %+v, want measured", b2)
+	}
+	for _, id := range []string{"P0", "P1"} {
+		if r := d.row(t, id); r.Status != "measured" {
+			t.Errorf("%s = %+v, want measured on the coverage layer", id, r)
+		}
+	}
+	if d.Real != nil {
+		t.Errorf("a mutation-only run has a real section: %+v", d.Real)
 	}
 }
