@@ -173,15 +173,25 @@ func TestStaleForAppliesTheChangeSetRule(t *testing.T) {
 			want: "new file: tools/x.py",
 		},
 		{
-			name: "unrecorded config file that is not listed",
+			name: "unrecorded config file that is not listed is compared by digest, not as head content",
 			edit: func(h *fakeHead) { h.readable[".hazard/hazard.yml"] = "x: 1\n" },
-			want: "new file: .hazard/hazard.yml",
+			want: "",
 		},
 		{
 			name:    "unrecorded config file that is not listed, inside the change set",
 			edit:    func(h *fakeHead) { h.readable[".hazard/hazard.yml"] = "x: 1\n" },
 			changed: changedSet(".hazard/hazard.yml"),
 			want:    "",
+		},
+		{
+			name: "unrecorded hazard.yml that is listed is compared by digest, not as head content",
+			edit: func(h *fakeHead) { h.files["hazard.yml"] = "version: 1\n" },
+			want: "",
+		},
+		{
+			name: "unrecorded .hazard/hazard.yml that is listed is compared by digest, not as head content",
+			edit: func(h *fakeHead) { h.files[".hazard/hazard.yml"] = "version: 1\n" },
+			want: "",
 		},
 		{
 			name:    "changed configuration with every file identical",
@@ -219,6 +229,83 @@ func TestStaleForAppliesTheChangeSetRule(t *testing.T) {
 	}
 }
 
+// configHeads are the states a configuration file can have at the selection
+// head. The engine loads the configuration from the working tree (or --config),
+// never from the head, so none of them says anything about the configuration.
+var configHeads = []struct {
+	name string
+	edit func(h *fakeHead, rel string)
+}{
+	{"absent from the head (ignored, never committed)", func(h *fakeHead, rel string) { delete(h.files, rel) }},
+	{"present at the head with other bytes", func(h *fakeHead, rel string) { h.files[rel] = "version: 1\n# edited at the head\n" }},
+	{"present at the head with the recorded bytes", func(h *fakeHead, rel string) {}},
+}
+
+// configManifest records a manifest of staleBase plus the configuration file
+// rel, the way Build does for a config that is ignored by git.
+func configManifest(t *testing.T, rel string) (*Manifest, map[string]string) {
+	t.Helper()
+	files := staleBase()
+	files[rel] = "version: 1\n"
+	m := staleManifest(t, config.Defaults(), files)
+	if _, ok := m.Files[rel]; !ok {
+		t.Fatalf("premise: the manifest does not record %s: %v", rel, m.Files)
+	}
+	return m, files
+}
+
+// TestStaleForComparesTheConfigurationByDigestNotAsHeadContent: the configuration
+// is not repository content at a revision (D055 condition 1 compares the digest
+// of the loaded configuration), so a recorded config file that the head lacks or
+// holds with other bytes does not make the index stale while the configuration
+// is the one the index was built with.
+func TestStaleForComparesTheConfigurationByDigestNotAsHeadContent(t *testing.T) {
+	t.Parallel()
+	for _, rel := range []string{"hazard.yml", ".hazard/hazard.yml"} {
+		for _, hc := range configHeads {
+			t.Run(rel+" "+hc.name, func(t *testing.T) {
+				t.Parallel()
+				m, files := configManifest(t, rel)
+				head := fakeHead{files: files, readable: map[string]string{}}
+				hc.edit(&head, rel)
+				reason, err := m.StaleFor(config.Defaults(), nil, head)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if reason != "" {
+					t.Fatalf("StaleFor = %q, want the index to be usable: the configuration digest is unchanged", reason)
+				}
+			})
+		}
+	}
+}
+
+// TestStaleForStillCatchesAChangedConfiguration is the safety side of the
+// exemption above: with the same heads, a configuration whose digest differs
+// from the recorded one is always "config changed", whatever the head holds.
+func TestStaleForStillCatchesAChangedConfiguration(t *testing.T) {
+	t.Parallel()
+	for _, rel := range []string{"hazard.yml", ".hazard/hazard.yml"} {
+		for _, hc := range configHeads {
+			t.Run(rel+" "+hc.name, func(t *testing.T) {
+				t.Parallel()
+				m, files := configManifest(t, rel)
+				head := fakeHead{files: files, readable: map[string]string{}}
+				hc.edit(&head, rel)
+				changed := config.Defaults()
+				changed.Impact.MaxHops++
+				reason, err := m.StaleFor(changed, nil, head)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if reason != "config changed" {
+					t.Fatalf("StaleFor = %q, want %q", reason, "config changed")
+				}
+			})
+		}
+	}
+}
+
 func TestStaleForReportsErrorsInsteadOfFreshness(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
@@ -231,9 +318,6 @@ func TestStaleForReportsErrorsInsteadOfFreshness(t *testing.T) {
 		}},
 		{"read of a recorded file fails", func(files map[string]string) fakeHead {
 			return fakeHead{files: files, readErr: map[string]error{"a/a.go": boom}}
-		}},
-		{"read of an unlisted config candidate fails", func(files map[string]string) fakeHead {
-			return fakeHead{files: files, readErr: map[string]error{"hazard.yml": boom}}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

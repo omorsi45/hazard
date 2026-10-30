@@ -12,6 +12,7 @@ import (
 	"github.com/omorsi45/hazard/internal/change"
 	"github.com/omorsi45/hazard/internal/config"
 	"github.com/omorsi45/hazard/internal/engine"
+	"github.com/omorsi45/hazard/internal/index"
 )
 
 const (
@@ -335,5 +336,54 @@ func TestReplayChecksOutTheBlobsByteForByte(t *testing.T) {
 		if want := gitIn(t, dir, "show", base+":"+rel); strings.TrimRight(string(got), "\n") != want {
 			t.Errorf("scratch %s = %q, want the blob %q", rel, got, want)
 		}
+	}
+}
+
+// TestReplaySelectWithAnUntrackedConfigKeepsTheDeterministicLayer: the studied
+// repository keeps its configuration only in the ignored .hazard directory, so
+// no replay commit holds it. The configuration is compared by digest, not as
+// content of the head, so Select must still run L1 on the replayed change
+// instead of abstaining with "file removed: .hazard/hazard.yml".
+func TestReplaySelectWithAnUntrackedConfigKeepsTheDeterministicLayer(t *testing.T) {
+	ctx := context.Background()
+	files := replayFiles()
+	delete(files, "hazard.yml")
+	files["sub/b_test.go"] = "package sub\n\nimport \"testing\"\n\nfunc TestB(t *testing.T) {\n\tif B() != 1 {\n\t\tt.Fatal(\"bad\")\n\t}\n}\n"
+	dir, base := newRepo(t, files)
+	writeFiles(t, dir, map[string]string{".hazard/hazard.yml": replayYM})
+	gitIn(t, dir, "check-ignore", "-q", ".hazard/hazard.yml") // premise: ignored
+	if tracked := gitIn(t, dir, "ls-files", ".hazard/hazard.yml"); tracked != "" {
+		t.Fatalf("premise: git tracks %q", tracked)
+	}
+	cfg, err := config.Load(filepath.Join(dir, ".hazard", "hazard.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := index.Build(ctx, dir, cfg, index.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Files[".hazard/hazard.yml"]; !ok {
+		t.Fatalf("premise: the index does not record the ignored config file: %v", m.Files)
+	}
+	if err := index.Publish(dir, m); err != nil {
+		t.Fatal(err)
+	}
+
+	r := openReplay(t, dir, base)
+	head, err := r.Commit(ctx, "sub/b.go", []byte(mutantB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := r.Select(ctx, head, engine.Options{})
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+
+	if d.AbstainReason == "index_stale" {
+		t.Fatalf("reason %q warnings %v, want the index to be usable", d.AbstainReason, d.Warnings)
+	}
+	if d.L1 == nil {
+		t.Fatalf("L1 is nil (reason %q, warnings %v), want the deterministic layer", d.AbstainReason, d.Warnings)
 	}
 }

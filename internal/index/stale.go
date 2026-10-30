@@ -29,8 +29,12 @@ type HeadReader interface {
 // head, and no unrecorded relevant file exists at head outside changed.
 // changed holds the Path and OldPath of every changed file; files inside it
 // are exempt from both content checks, because a graph edge out of a changed
-// file starts at a package the change already selects. An error means
-// staleness could not be determined and must be treated as stale.
+// file starts at a package the change already selects. The two configuration
+// files (isConfigPath) are exempt from both content checks too: the
+// configuration is compared by digest, not as head content. The engine loads it
+// from the working tree (or --config), never from the head, and git may ignore
+// it, so a commit need not hold it. An error means staleness could not be
+// determined and must be treated as stale.
 func (m *Manifest) StaleFor(cfg config.Config, changed map[string]bool, head HeadReader) (reason string, err error) {
 	digest, err := configDigest(cfg)
 	if err != nil {
@@ -45,7 +49,7 @@ func (m *Manifest) StaleFor(cfg config.Config, changed map[string]bool, head Hea
 	}
 	sort.Strings(recorded)
 	for _, p := range recorded {
-		if changed[p] {
+		if changed[p] || isConfigPath(p) {
 			continue
 		}
 		data, err := head.Read(p)
@@ -62,34 +66,20 @@ func (m *Manifest) StaleFor(cfg config.Config, changed map[string]bool, head Hea
 	if err != nil {
 		return "", fmt.Errorf("list files at head: %w", err)
 	}
-	isListed := make(map[string]bool, len(listed))
-	for _, p := range listed {
-		isListed[p] = true
-	}
-	// The config files are relevant even when ignored, so they are looked up
-	// directly instead of through the listing.
 	candidates := append([]string(nil), listed...)
-	for _, p := range []string{"hazard.yml", ".hazard/hazard.yml"} {
-		if !isListed[p] {
-			candidates = append(candidates, p)
-		}
-	}
 	sort.Strings(candidates)
 	for _, p := range candidates {
-		if _, ok := m.Files[p]; ok || changed[p] || !isRelevant(p, cfg) {
+		if _, ok := m.Files[p]; ok || changed[p] || isConfigPath(p) || !isRelevant(p, cfg) {
 			continue
-		}
-		if !isListed[p] {
-			switch _, err := head.Read(p); {
-			case errors.Is(err, fs.ErrNotExist):
-				continue
-			case err != nil:
-				return "", fmt.Errorf("read %s at head: %w", p, err)
-			}
 		}
 		return "new file: " + p, nil
 	}
 	return "", nil
+}
+
+// isConfigPath reports whether rel is one of the two configuration locations.
+func isConfigPath(rel string) bool {
+	return rel == "hazard.yml" || rel == ".hazard/hazard.yml"
 }
 
 // workTreeHead is the working tree of a git repository as a HeadReader.
