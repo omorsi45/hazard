@@ -124,11 +124,16 @@ func marshalLine(r Record) ([]byte, error) {
 // file, and syncs it. A previous crash can leave an incomplete last line:
 // Append drops that fragment first, because Read would skip it anyway and a
 // new record must not be glued to it.
-func Append(path string, r Record) (err error) {
+func Append(path string, r Record) error {
 	line, err := marshalLine(r)
 	if err != nil {
 		return err
 	}
+	return appendLine(path, line)
+}
+
+// appendLine appends one newline-terminated line to path (see Append).
+func appendLine(path string, line []byte) (err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("telemetry: create directory: %w", err)
 	}
