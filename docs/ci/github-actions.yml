@@ -34,7 +34,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-      - run: go install github.com/omorsi45/hazard/cmd/hazard@v0.1.0
+      - run: go install github.com/omorsi45/hazard/cmd/hazard@latest # pin a release tag or a commit when you adopt this
 
       - name: restore hazard state
         uses: actions/cache@v4
@@ -66,7 +66,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-      - run: go install github.com/omorsi45/hazard/cmd/hazard@v0.1.0
+      - run: go install github.com/omorsi45/hazard/cmd/hazard@latest # pin a release tag or a commit when you adopt this
 
       - name: restore hazard state
         uses: actions/cache@v4

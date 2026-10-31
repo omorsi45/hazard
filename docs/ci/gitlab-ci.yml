@@ -13,7 +13,7 @@ stages: [test]
   variables:
     GIT_DEPTH: 0
   before_script:
-    - go install github.com/omorsi45/hazard/cmd/hazard@v0.1.0
+    - go install github.com/omorsi45/hazard/cmd/hazard@latest # pin a release tag or a commit when you adopt this
   cache:
     key: "hazard-$CI_COMMIT_REF_SLUG"
     paths: [.hazard/]
