@@ -22,6 +22,7 @@ Other versions are not tested.
 - **The exit code is the runner's.** `hazard run` exits with the first nonzero exit code of the processes it started. It never exits 0 after an error, and an internal failure of an adapter exits 70.
 - **A JUnit report is written** to `--junit` (default `.hazard/junit.xml`). A report left by an earlier run is removed first, so a failed run cannot be read as the previous run's result. When both adapters run, their reports are merged into one `<testsuites>` file, and nothing is published unless both adapters wrote theirs.
 - **An adapter that cannot start, or that ends in an internal error, widens its job to its full suite once.** The telemetry records the reason as `internal_error`. With `--no-fallback`, the error ends the command instead.
+- **Canceling ends the whole process tree.** `go test` starts the test binary as a child process. On Linux and macOS each runner process starts in a process group of its own and a cancel kills the group; on Windows it ends the tree with `taskkill /T`. A hung test does not outlive the command that was canceled.
 - **A selected test that cannot be expressed to its runner** (a missing package or runner ID, an unknown language, a disabled language) runs the full suite for the whole command, with the reason `runner_limit`.
 - **Selection never runs Python.** The index, built by `hazard index`, holds everything selection needs. See [DESIGN.md](DESIGN.md).
 

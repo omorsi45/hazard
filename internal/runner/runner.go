@@ -139,6 +139,7 @@ func runProcess(ctx context.Context, inv Invocation, stdout, stderr io.Writer) (
 		cmd.Env = append(os.Environ(), inv.Env...)
 	}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
+	killOnCancel(cmd)
 	cmd.WaitDelay = processWaitDelay
 	err := cmd.Run()
 	if err == nil {

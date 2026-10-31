@@ -12,9 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -371,16 +369,6 @@ type cmdResult struct {
 	Exit           int
 }
 
-// killTree ends a command and, on Windows, its child processes: go test starts
-// the test binary as a child, and killing only go.exe would leave it running.
-func killTree(p *os.Process) error {
-	if runtime.GOOS == "windows" {
-		// Best effort: the Kill below reports a failure to end the process itself.
-		_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.Pid)).Run()
-	}
-	return p.Kill()
-}
-
 // runCmd runs name in dir. A nonzero exit is reported in Exit with a nil error;
 // an error means the command could not run to completion or ctx ended.
 func runCmd(ctx context.Context, dir, name string, args ...string) (cmdResult, error) {
@@ -388,7 +376,7 @@ func runCmd(ctx context.Context, dir, name string, args ...string) (cmdResult, e
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	cmd.Cancel = func() error { return killTree(cmd.Process) }
+	killOnCancel(cmd)
 	cmd.WaitDelay = 15 * time.Second
 	err := cmd.Run()
 	res := cmdResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
