@@ -210,9 +210,11 @@ func TestLTTFalseCertificationRate(t *testing.T) {
 		n     = 2000
 		alpha = 0.01
 		delta = 0.05
-		// delta*seeds = 50; three binomial standard deviations (about 6.9
-		// each) put the ceiling at about 70.
-		maxFalse = 70
+		// Hoeffding-Bentkus is conservative: delta*seeds = 50 is the level of
+		// an exact test, and this experiment is deterministic (2 false
+		// certifications). The ceiling sits at half the level, so a level
+		// inflated tenfold (p <= 10*delta, 67 false certifications) fails.
+		maxFalse = 25
 	)
 	grid, err := ParseGrid("0.005:0.5:0.005")
 	if err != nil {
@@ -246,6 +248,47 @@ func TestLTTFalseCertificationRate(t *testing.T) {
 	// The check must not pass vacuously by refusing everything.
 	if certified < 900 {
 		t.Errorf("only %d of %d seeds certified any lambda: the test would pass by refusing", certified, seeds)
+	}
+}
+
+// TestLTTCertifiesNothingWhenTheRiskExceedsAlphaFromTheFirstLambda: the loss
+// curve above begins below alpha and grows smoothly, so its walk never meets an
+// empirical loss far above alpha, the only situation in which the un-clipped KL
+// term of the Hoeffding-Bentkus bound misbehaves (it shrinks as the loss grows
+// and would reject H). Here the true risk exceeds alpha at the first grid point
+// and everywhere after it: R(lambda) = 0.02 and 0.05 against alpha = 0.01.
+// Every H is true, so a certification of any lambda is a false one, and across
+// 1000 samples there must be none. The p-value is clipped to 1 whenever the
+// empirical loss reaches alpha; without the clip all of the 1000 certify.
+func TestLTTCertifiesNothingWhenTheRiskExceedsAlphaFromTheFirstLambda(t *testing.T) {
+	const (
+		seeds = 1000
+		n     = 2000
+		alpha = 0.01
+		delta = 0.05
+	)
+	grid, err := ParseGrid("0.005:0.5:0.005")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, trueRisk := range []float64{0.02, 0.05} {
+		certified := 0
+		for seed := 0; seed < seeds; seed++ {
+			rng := rand.New(rand.NewPCG(uint64(seed), 0x9e3779b97f4a7c15))
+			misses := 0
+			for i := 0; i < n; i++ {
+				if rng.Float64() < trueRisk {
+					misses++
+				}
+			}
+			risk := func(float64) float64 { return float64(misses) / n } // the same at every lambda
+			if res := LTT(n, risk, grid, alpha, delta); !res.Refused {
+				certified++
+			}
+		}
+		if certified != 0 {
+			t.Errorf("true risk %v: %d of %d seeds certified a lambda although R(lambda) > alpha everywhere", trueRisk, certified, seeds)
+		}
 	}
 }
 
