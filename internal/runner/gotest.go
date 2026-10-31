@@ -14,6 +14,10 @@ import (
 // whose pattern is longer runs whole instead.
 const maxGoPatternLen = 8000
 
+// goMissingReason is Result.Reason when a narrowed run was asked for tests that
+// never started.
+const goMissingReason = "go_missing_tests"
+
 // GoInvocations plans the go test processes for req. It returns the
 // invocations and the packages that are run whole because their anchored
 // pattern would be too long.
@@ -109,6 +113,23 @@ func goTargetParent(t Target) (string, error) {
 	return parent, nil
 }
 
+// missingGoTargets returns the sorted IDs of the targets whose top-level test
+// never started in the stream b read. go test exits 0 with "no tests to run"
+// when -run matches nothing, so a selected test that was renamed or removed
+// since the index was built would otherwise count as passed. A target that
+// cannot be resolved is missing too: an unknown is never a pass.
+func missingGoTargets(b *goJUnitBuilder, targets []Target) []string {
+	var missing []string
+	for _, t := range targets {
+		parent, err := goTargetParent(t)
+		if err != nil || !b.started(t.Package, parent) {
+			missing = append(missing, t.ID)
+		}
+	}
+	slices.Sort(missing)
+	return slices.Compact(missing)
+}
+
 // RunGo runs the planned go test invocations and writes one JUnit report to
 // the request's JUnitPath.
 //
@@ -116,6 +137,11 @@ func goTargetParent(t Target) (string, error) {
 // process exit code and is 0 only when every invocation passed; it is never 0
 // when an error is returned. The report is written only when every process ran
 // to completion, and a report from an earlier run is removed first.
+//
+// A narrowed run whose selected tests did not all start (see missingGoTargets)
+// reports Abstained with the reason go_missing_tests and the IDs in Missing,
+// like a pytest run with unknown node IDs, so the caller reruns the full
+// suite. The report of the narrowed attempt is still written.
 func RunGo(ctx context.Context, req Request) (Result, error) {
 	invocations, widened, err := GoInvocations(req)
 	if err != nil {
@@ -138,6 +164,12 @@ func RunGo(ctx context.Context, req Request) (Result, error) {
 		}
 		if res.ExitCode == 0 {
 			res.ExitCode = code
+		}
+	}
+
+	if !req.Full {
+		if missing := missingGoTargets(builder, req.Targets); len(missing) > 0 {
+			res.Abstained, res.Reason, res.Missing = true, goMissingReason, missing
 		}
 	}
 

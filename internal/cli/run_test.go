@@ -747,6 +747,36 @@ func TestRunPytestAbstentionRerunsTheFullPythonSuite(t *testing.T) {
 	}
 }
 
+// TestRunGoAbstentionRerunsTheFullGoSuite: a narrowed Go run whose selected
+// tests did not all start is not a result. Like a pytest abstention it reruns
+// the full Go suite once and the telemetry records runner_limit.
+func TestRunGoAbstentionRerunsTheFullGoSuite(t *testing.T) {
+	r := newRig(t, narrowedDecision())
+	r.gor.steps = []runStep{
+		{res: runner.Result{ExitCode: 0, Abstained: true, Reason: "go_missing_tests", Missing: []string{goA}}},
+		{res: runner.Result{ExitCode: 0}},
+	}
+	code, _, errOut := r.run()
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errOut)
+	}
+	if len(r.gor.reqs) != 2 || r.gor.reqs[0].Full || len(r.gor.reqs[0].Targets) == 0 || !r.gor.reqs[1].Full || len(r.gor.reqs[1].Targets) != 0 {
+		t.Fatalf("go requests = %+v, want a narrowed attempt then a full rerun", r.gor.reqs)
+	}
+	if !strings.Contains(errOut, "go_missing_tests") {
+		t.Errorf("stderr = %q, want the reason named", errOut)
+	}
+	if rec := r.onlyRecord(); !rec.FullSuite || rec.AbstainReason != "runner_limit" {
+		t.Errorf("record = %+v, want full_suite with runner_limit", rec)
+	}
+
+	r = newRig(t, narrowedDecision())
+	r.gor.steps = []runStep{{res: runner.Result{ExitCode: 0, Abstained: true, Reason: "go_missing_tests"}}, {res: runner.Result{ExitCode: 1}}}
+	if code, _, _ = r.run(); code != 1 {
+		t.Errorf("a failing rerun must exit 1, got %d", code)
+	}
+}
+
 func TestRunRunnerInternalErrors(t *testing.T) {
 	boom := errors.New("boom")
 	t.Run("a narrowed run falls back to that language's full suite", func(t *testing.T) {

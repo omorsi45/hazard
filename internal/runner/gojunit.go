@@ -70,6 +70,7 @@ type goPackageResult struct {
 	elapsed     float64
 	failedBuild string
 	out         tailBuffer
+	started     map[string]bool // tests that have a run event, subtests included
 }
 
 // goJUnitBuilder turns a go test -json stream into one JUnit report. It is an
@@ -137,10 +138,17 @@ func (b *goJUnitBuilder) line(raw []byte, newline bool) {
 	}
 }
 
+// started reports whether the stream held a run event for the test of the
+// package: the test body was entered, whatever its result.
+func (b *goJUnitBuilder) started(pkg, test string) bool {
+	p := b.packages[pkg]
+	return p != nil && p.started[test]
+}
+
 func (b *goJUnitBuilder) pkg(name string) *goPackageResult {
 	p := b.packages[name]
 	if p == nil {
-		p = &goPackageResult{name: name, active: map[string]*goCaseResult{}}
+		p = &goPackageResult{name: name, active: map[string]*goCaseResult{}, started: map[string]bool{}}
 		b.packages[name] = p
 	}
 	return p
@@ -193,6 +201,7 @@ func (b *goJUnitBuilder) handle(ev goEvent) {
 			return
 		}
 		p := b.pkg(ev.Package)
+		p.started[ev.Test] = true
 		if _, running := p.active[ev.Test]; running {
 			// The previous run of this test never reported a result.
 			p.finish(ev.Test, "error", 0)

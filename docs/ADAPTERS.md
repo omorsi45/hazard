@@ -71,6 +71,10 @@ These tests pass in the Windows and the Linux gates of this branch.
 - The JUnit report is built from the `go test -json` stream. An output tail of at most 8 KiB is kept per test and per package. A test that never reported a result is an error, a suite with no package result is incomplete, and a package whose build failed cannot parse as green.
 - The report is written atomically, and only when every process ran to completion.
 
+### A selected test that did not run
+
+`go test -run` prints `ok ... [no tests to run]` and exits 0 when the pattern matches nothing, so a selected test that was renamed or removed since the index was built would pass unnoticed. After a narrowed run, `hazard` compares the selected top-level tests with the tests that have a `run` event in the `go test -json` stream. If any selected test never started, the adapter reports an abstention with the reason `go_missing_tests` and the IDs of the missing tests, `hazard run` warns and runs the full Go suite once, and the telemetry records `runner_limit`. A package that does not build, a test binary that panics and a `-failfast` stop before the selected test also leave tests unstarted, so they take the same path. The report of the narrowed attempt is written first and the full run replaces it.
+
 ## The pytest adapter
 
 ### Identity

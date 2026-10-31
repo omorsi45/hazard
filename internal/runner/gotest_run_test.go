@@ -514,6 +514,77 @@ func TestRunGoNativeFullSuite(t *testing.T) {
 	}
 }
 
+// TestRunGoReportsASelectedTestThatDidNotRun: go test prints "ok ... [no tests
+// to run]" and exits 0 when -run matches nothing, so a selected test that was
+// renamed or removed since the index was built would pass unnoticed. A narrowed
+// run compares the selected top-level tests with the ones that started, and a
+// test that did not start makes the run abstain, like a missing pytest node ID.
+func TestRunGoReportsASelectedTestThatDidNotRun(t *testing.T) {
+	spec := fakeGoSpec{Packages: map[string]fakeGoPackage{
+		"p/a": passPackage("p/a", "TestA", "TestParent"),
+		"p/b": passPackage("p/b", "TestB"),
+	}}
+	targets := []Target{
+		goTarget("p/a", "TestA"),
+		goTarget("p/a", "TestParent/sub"), // a subtest widens to its parent, which ran
+		goTarget("p/a", "TestRenamedAway"),
+		goTarget("p/b", "TestB"),
+		goTarget("p/b", "TestGone"),
+	}
+	useFakeGo(t, spec)
+	dir := t.TempDir()
+
+	res, _, _, err := runGoRequest(t, Request{RepoDir: dir, Targets: targets})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Abstained || res.Reason != goMissingReason {
+		t.Errorf("Abstained %v Reason %q, want an abstention with %s", res.Abstained, res.Reason, goMissingReason)
+	}
+	if want := []string{"go:p/a:TestRenamedAway", "go:p/b:TestGone"}; !slices.Equal(res.Missing, want) {
+		t.Errorf("Missing = %v, want %v", res.Missing, want)
+	}
+	if got := caseNames(readJUnitFile(t, filepath.Join(dir, "junit.xml"))); len(got) == 0 {
+		t.Error("the report of the narrowed attempt must still be written")
+	}
+
+	t.Run("nothing is missing when every selected test started", func(t *testing.T) {
+		useFakeGo(t, spec)
+		res, _, _, err := runGoRequest(t, Request{RepoDir: t.TempDir(), Targets: []Target{goTarget("p/a", "TestA"), goTarget("p/b", "TestB")}})
+		if err != nil || res.Abstained || res.Reason != "" || len(res.Missing) != 0 {
+			t.Errorf("Abstained %v Reason %q Missing %v err %v, want a plain run", res.Abstained, res.Reason, res.Missing, err)
+		}
+	})
+	t.Run("a full run has nothing to compare", func(t *testing.T) {
+		useFakeGo(t, spec)
+		res, _, _, err := runGoRequest(t, Request{RepoDir: t.TempDir(), Full: true, Targets: targets})
+		if err != nil || res.Abstained || len(res.Missing) != 0 {
+			t.Errorf("Abstained %v Missing %v err %v, want a plain full run", res.Abstained, res.Missing, err)
+		}
+	})
+}
+
+// TestRunGoNativeSelectedTestThatDoesNotExistAbstains is the real go command
+// printing "ok [no tests to run]" for a selected test that is not there.
+func TestRunGoNativeSelectedTestThatDoesNotExistAbstains(t *testing.T) {
+	t.Parallel()
+	dir := nativeGoFixture(t)
+	core := fixtureModule + "/core"
+	res, _, _ := runGoNative(t, Request{
+		RepoDir:     dir,
+		Targets:     []Target{goTarget(core, "TestFoo"), goTarget(core, "TestNopeDoesNotExist")},
+		Passthrough: []string{"-count=1", "-vet=off"},
+		JUnitPath:   filepath.Join(t.TempDir(), "junit.xml"),
+	})
+	if res.ExitCode != 0 {
+		t.Fatalf("exit code %d: the fixture premise is that go test passes while TestNopeDoesNotExist matches nothing", res.ExitCode)
+	}
+	if !res.Abstained || res.Reason != goMissingReason || !slices.Equal(res.Missing, []string{"go:" + core + ":TestNopeDoesNotExist"}) {
+		t.Errorf("Abstained %v Reason %q Missing %v, want the missing test reported", res.Abstained, res.Reason, res.Missing)
+	}
+}
+
 func TestRunGoNativeBuildFailureIsNonZeroAndNeverGreen(t *testing.T) {
 	t.Parallel()
 	dir := nativeGoFixture(t)
