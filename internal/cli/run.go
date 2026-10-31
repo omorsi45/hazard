@@ -82,7 +82,12 @@ const (
 const runLong = `Select the tests the change could break, run them with the native runner and
 exit with the runner's own exit code. Whenever the selection cannot be trusted
 the full suite runs. Arguments after -- go to every runner that runs; none may
-narrow the tests.`
+narrow the tests.
+
+hazard run executes the checked-out tree. An explicit --head is accepted only
+when it names the commit at HEAD and the work tree has no tracked
+modification; any other head is a usage error (exit 2) and nothing runs. Leave
+--head out to test the working tree, or check out the commit to test.`
 
 func newRunCommand(sel selectFunc, rn runners) *cobra.Command {
 	cmd := &cobra.Command{Use: "run [flags] [-- runner arguments]", Short: "Select and run tests", Long: runLong, Args: cobra.ArbitraryArgs}
@@ -207,6 +212,9 @@ func runCommand(cmd *cobra.Command, args []string, sel selectFunc, rn runners) e
 	}
 	root, err := repoRoot(ctx)
 	if err != nil {
+		return err
+	}
+	if err := requireCheckedOutHead(ctx, root, req.head); err != nil {
 		return err
 	}
 	cfg, err := loadIndexConfig(root, req.config)
@@ -564,14 +572,54 @@ func mergeJUnit(dst string, parts ...string) error {
 
 // headSHA is the commit HEAD names in dir, or "" when there is none (an empty
 // repository): a record without a commit is still a valid record.
-func headSHA(ctx context.Context, dir string) string {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+func headSHA(ctx context.Context, dir string) string { return resolveCommit(ctx, dir, "HEAD") }
+
+// resolveCommit is the commit ref names in dir, or "" when it names none.
+func resolveCommit(ctx context.Context, dir, ref string) string {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// requireCheckedOutHead refuses an explicit --head that the runners would not
+// execute. The adapters run the checked-out tree, so a head naming another
+// commit would select for one revision and test another, and a red commit could
+// exit 0. The head must be the commit at HEAD and the work tree must have no
+// tracked modification (staged or not). An empty head is the working tree,
+// whatever it holds. Any doubt is a refusal: the user reruns without --head.
+func requireCheckedOutHead(ctx context.Context, root, head string) error {
+	if head == "" {
+		return nil
+	}
+	want := resolveCommit(ctx, root, head)
+	if want == "" {
+		return usageError{fmt.Errorf("--head %q does not name a commit; hazard run executes the checked-out tree, so leave --head out to test it", head)}
+	}
+	have := headSHA(ctx, root)
+	if have == "" || want != have {
+		return usageError{fmt.Errorf("--head %s is not the checked-out commit (%s): hazard run executes the checked-out tree, so check out %s or leave --head out", head, orNone(have), shortSHA(want))}
+	}
+	err := exec.CommandContext(ctx, "git", "-C", root, "diff", "--quiet", "HEAD", "--").Run()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &exit) && exit.ExitCode() == 1:
+		return usageError{fmt.Errorf("--head %s names the checked-out commit, but the work tree has tracked modifications: hazard run executes the checked-out tree, so commit or stash them, or leave --head out", head)}
+	}
+	return fmt.Errorf("check the work tree against HEAD: %w", err)
+}
+
+// shortSHA is the first 12 characters of a commit ID.
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 // writeTelemetry appends rec when telemetry is enabled: to the configured JSONL

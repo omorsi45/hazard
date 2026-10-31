@@ -468,17 +468,111 @@ func TestRunRejectsMisuse(t *testing.T) {
 
 func TestRunForwardsTheSelectionFlags(t *testing.T) {
 	r := newRig(t, narrowedDecision())
-	code, _, errOut := r.run("--base", "main", "--head", "feature", "--max-candidates", "7", "--budget-ms", "99", "--lock", "x.lock")
+	head := commitEmpty(t, r.root) // an explicit --head must be the checked-out commit
+	code, _, errOut := r.run("--base", "main", "--head", head, "--max-candidates", "7", "--budget-ms", "99", "--lock", "x.lock")
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errOut)
 	}
 	got := r.sel.got
-	if got.Base != "main" || got.Head != "feature" || got.MaxCandidates != 7 || got.BudgetMS != 99 || got.Shadow || !sameDir(t, got.RepoDir, r.root) {
+	if got.Base != "main" || got.Head != head || got.MaxCandidates != 7 || got.BudgetMS != 99 || got.Shadow || !sameDir(t, got.RepoDir, r.root) {
 		t.Errorf("Select options = %+v", got)
 	}
 	if !strings.HasSuffix(filepath.ToSlash(got.LockPath), "/x.lock") {
 		t.Errorf("lock path = %q", got.LockPath)
 	}
+}
+
+// commitFile commits one file with the given content and returns the commit.
+func commitFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, dir, "add", name)
+	gitTest(t, dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "-m", content)
+	return gitTest(t, dir, "rev-parse", "HEAD")
+}
+
+// TestRunRefusesAnExplicitHeadThatIsNotTheCheckout: the runners execute the
+// checked-out tree, so a head that names another commit would select for one
+// revision and test another: a red commit could exit 0. Such a head is a usage
+// error before anything runs. The default head (the working tree) is unchanged.
+func TestRunRefusesAnExplicitHeadThatIsNotTheCheckout(t *testing.T) {
+	// c0 is checked out; c1 is its child, not checked out.
+	setup := func(t *testing.T) (r *rig, c0, c1 string) {
+		t.Helper()
+		r = newRig(t, narrowedDecision())
+		c0 = commitFile(t, r.root, "a.txt", "one\n")
+		c1 = commitFile(t, r.root, "a.txt", "two\n")
+		gitTest(t, r.root, "checkout", "-q", c0)
+		return r, c0, c1
+	}
+	refused := func(t *testing.T, r *rig, args ...string) {
+		t.Helper()
+		code, _, errOut := r.run(args...)
+		if code != 2 {
+			t.Errorf("code=%d err=%q, want 2", code, errOut)
+		}
+		if !strings.Contains(errOut, "checked-out") {
+			t.Errorf("stderr = %q, want it to say that hazard run executes the checked-out tree", errOut)
+		}
+		if r.sel.calls != 0 || len(r.log) != 0 {
+			t.Errorf("nothing may run: %d Select calls, runner calls %v", r.sel.calls, r.log)
+		}
+	}
+
+	t.Run("a commit that is not checked out", func(t *testing.T) {
+		r, c0, c1 := setup(t)
+		refused(t, r, "--base", c0, "--head", c1)
+	})
+	t.Run("a branch name that is not checked out", func(t *testing.T) {
+		r, c0, c1 := setup(t)
+		gitTest(t, r.root, "branch", "other", c1)
+		refused(t, r, "--base", c0, "--head", "other")
+	})
+	t.Run("a ref that is not a commit", func(t *testing.T) {
+		r, _, _ := setup(t)
+		refused(t, r, "--head", "no-such-ref")
+	})
+	t.Run("the checked-out commit with a tracked modification", func(t *testing.T) {
+		r, c0, _ := setup(t)
+		if err := os.WriteFile(filepath.Join(r.root, "a.txt"), []byte("edited\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		refused(t, r, "--head", c0)
+	})
+	t.Run("a staged modification counts too", func(t *testing.T) {
+		r, c0, _ := setup(t)
+		if err := os.WriteFile(filepath.Join(r.root, "a.txt"), []byte("staged\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, r.root, "add", "a.txt")
+		refused(t, r, "--head", c0)
+	})
+	for name, ref := range map[string]string{"by SHA": "SHA", "by HEAD": "HEAD"} {
+		t.Run("the checked-out commit "+name, func(t *testing.T) {
+			r, c0, _ := setup(t)
+			if ref == "SHA" {
+				ref = c0
+			}
+			if err := os.WriteFile(filepath.Join(r.root, "untracked.txt"), []byte("x\n"), 0o644); err != nil { // untracked files do not count
+				t.Fatal(err)
+			}
+			code, _, errOut := r.run("--head", ref)
+			if code != 0 || r.sel.calls != 1 || r.sel.got.Head != ref {
+				t.Errorf("code=%d err=%q Select calls %d head %q, want a normal run with the head forwarded", code, errOut, r.sel.calls, r.sel.got.Head)
+			}
+		})
+	}
+	t.Run("no --head is the working tree, modified or not", func(t *testing.T) {
+		r, _, _ := setup(t)
+		if err := os.WriteFile(filepath.Join(r.root, "a.txt"), []byte("edited\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if code, _, errOut := r.run(); code != 0 || r.sel.calls != 1 {
+			t.Errorf("code=%d err=%q Select calls %d, want a normal run", code, errOut, r.sel.calls)
+		}
+	})
 }
 
 func TestRunExplainPrintsTheSelectionToStderr(t *testing.T) {
