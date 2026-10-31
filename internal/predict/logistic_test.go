@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/omorsi45/hazard/internal/impact"
@@ -48,8 +50,7 @@ func norm(v []float64) float64 {
 
 // separable returns a fit and a scale set where feature 0 raises and feature 1
 // lowers the chance of a positive label. The cluster centres sit at +-0.5 so
-// that both descents meet the default tolerance well inside the default
-// MaxIter (centres at +-1 need about 6000 and 13000 iterations).
+// that the classes overlap and the fit has a finite optimum.
 func separable() (fit, scale []Example) {
 	g := lcg(11)
 	return clusters(&g, 100, 100, [2]float64{0.5, -0.5}, [2]float64{-0.5, 0.5}, "f"),
@@ -57,7 +58,7 @@ func separable() (fit, scale []Example) {
 }
 
 func TestLogisticDefaultOptions(t *testing.T) {
-	want := LogisticOptions{L2: 1, CIWeight: 10, MaxIter: 5000, Tol: 1e-9, LearningRate: 0.1}
+	want := LogisticOptions{L2: 1, CIWeight: 10, MaxIter: 5000, Tol: 1e-9}
 	if got := DefaultLogisticOptions(); got != want {
 		t.Errorf("DefaultLogisticOptions() = %+v, want %+v", got, want)
 	}
@@ -227,11 +228,10 @@ func TestLogisticL2ShrinksWeightsMonotonically(t *testing.T) {
 		if err != nil {
 			t.Fatalf("L2=%v: %v", l2, err)
 		}
-		// Iterations below the cap means the coefficient descent met the
-		// tolerance; Converged also needs the Platt descent, which is slow
-		// when strong shrinkage leaves the raw logits almost constant.
+		// Iterations below the cap means the coefficient fit met the
+		// tolerance.
 		if m.Iterations >= opts.MaxIter {
-			t.Fatalf("L2=%v coefficient descent hit the %d iteration cap", l2, opts.MaxIter)
+			t.Fatalf("L2=%v coefficient fit hit the %d iteration cap", l2, opts.MaxIter)
 		}
 		n := norm(m.Weights)
 		if !(n < prev) {
@@ -270,7 +270,7 @@ func TestLogisticClassWeightingRaisesMinorityRecall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("standardize: %v", err)
 	}
-	w, b, _, _, err := descend(logisticProblem{x: x, y: exampleLabels(fit), w: ones(len(fit)), l2: opts.L2}, make([]float64, 2), 0, opts)
+	w, b, _, _, err := descend(logisticProblem{x: x, y: labelTargets(exampleLabels(fit)), w: ones(len(fit)), l2: opts.L2}, make([]float64, 2), 0, opts)
 	if err != nil {
 		t.Fatalf("descend: %v", err)
 	}
@@ -322,13 +322,17 @@ func TestLogisticFitHonoursExampleWeight(t *testing.T) {
 // calibratedGrid returns a logit grid where P(y=1|z)=sigmoid(z) holds exactly:
 // each z carries one positive row of weight sigmoid(z) and one negative row of
 // weight 1-sigmoid(z), so the class counts are equal and class weights are 1.
+// The weights are scaled by a million so the weighted class counts are large
+// and the Platt target smoothing (which moves targets by about 1/(N+2)) is far
+// below the 1e-3 tolerance of the recovery test.
 func calibratedGrid(transform func(z float64) float64) (z []float64, y []bool, w []float64) {
+	const mass = 1e6
 	for k := -8; k <= 8; k++ {
 		raw := float64(k) / 2
 		p := sigmoid(raw)
 		z = append(z, transform(raw), transform(raw))
 		y = append(y, true, false)
-		w = append(w, p, 1-p)
+		w = append(w, mass*p, mass*(1-p))
 	}
 	return z, y, w
 }
@@ -386,16 +390,63 @@ func TestLogisticPlattRefusals(t *testing.T) {
 	}
 }
 
-// extremeScale is a scale set the fitted model separates perfectly, so the
-// Platt slope has no finite optimum and its descent cannot meet the tolerance.
-func extremeScale() []Example {
+// separatedScale is a scale set the fitted model separates perfectly: ten
+// positives at (k, -k) and ten negatives at (-k, k). The unpenalized maximum
+// likelihood slope of the Platt fit would be infinite; the smoothed Platt
+// targets give it a finite optimum.
+func separatedScale(k float64) []Example {
 	var out []Example
 	for i := 0; i < 10; i++ {
 		out = append(out,
-			Example{Features: []float64{3, -3}, Label: true, Weight: 1, Group: fmt.Sprintf("x-p%02d", i)},
-			Example{Features: []float64{-3, 3}, Label: false, Weight: 1, Group: fmt.Sprintf("x-n%02d", i)})
+			Example{Features: []float64{k, -k}, Label: true, Weight: 1, Group: fmt.Sprintf("x-p%02d", i)},
+			Example{Features: []float64{-k, k}, Label: false, Weight: 1, Group: fmt.Sprintf("x-n%02d", i)})
 	}
 	return out
+}
+
+func extremeScale() []Example { return separatedScale(3) }
+
+func TestLogisticSeparableScaleSetConverges(t *testing.T) {
+	fit, _ := separable()
+	m, err := FitLogistic(fit, extremeScale(), DefaultLogisticOptions())
+	if err != nil {
+		t.Fatalf("FitLogistic with a separable scale set: %v", err)
+	}
+	if !m.Converged {
+		t.Error("Converged = false although the smoothed Platt targets have a finite optimum on a separable scale set")
+	}
+	if !isFinite(m.PlattA) || !isFinite(m.PlattB) || !(m.PlattA > 0) {
+		t.Errorf("platt a=%v b=%v, want finite with a positive slope", m.PlattA, m.PlattB)
+	}
+}
+
+// TestLogisticPlattSurvivesSaturatedLogits: scale rows far outside the fit
+// give raw logits of tens to hundreds, where the sigmoid is flat and a
+// Newton solve started at slope 1 has no usable curvature.
+func TestLogisticPlattSurvivesSaturatedLogits(t *testing.T) {
+	fit, _ := separable()
+	for _, k := range []float64{30, 100} {
+		t.Run(fmt.Sprintf("features at +-%v", k), func(t *testing.T) {
+			scale := separatedScale(k)
+			opts := DefaultLogisticOptions()
+			m, err := FitLogistic(fit, scale, opts)
+			if err != nil {
+				t.Fatalf("FitLogistic: %v", err)
+			}
+			if !m.Converged {
+				t.Fatalf("Converged = false (platt a=%v b=%v)", m.PlattA, m.PlattB)
+			}
+			logits := make([]float64, len(scale))
+			y := make([]bool, len(scale))
+			for i, e := range scale {
+				logits[i], y[i] = m.logit(e.Features), e.Label
+			}
+			ga, gb := refPlattGradient(logits, y, refWeights(scale), m.PlattA, m.PlattB)
+			if math.Abs(ga) >= opts.Tol || math.Abs(gb) >= opts.Tol {
+				t.Errorf("platt gradient (%g, %g) at a=%v b=%v, want below %g in both components", ga, gb, m.PlattA, m.PlattB, opts.Tol)
+			}
+		})
+	}
 }
 
 func TestLogisticConvergedNeedsBothStages(t *testing.T) {
@@ -408,15 +459,29 @@ func TestLogisticConvergedNeedsBothStages(t *testing.T) {
 	if !base.Converged {
 		t.Fatalf("baseline fit did not converge in %d iterations", base.Iterations)
 	}
-	sep, err := FitLogistic(fit, extremeScale(), opts)
+	// The Platt fit on this scale set converges, but needs more iterations
+	// than the coefficient fit.
+	wide := separatedScale(10)
+	logits := make([]float64, len(wide))
+	for i, e := range wide {
+		logits[i] = base.logit(e.Features)
+	}
+	_, _, plattIters, plattConverged, err := fitPlatt(logits, exampleLabels(wide), ones(len(wide)), opts)
+	if err != nil || !plattConverged || plattIters <= base.Iterations {
+		t.Fatalf("fixture drifted: platt fit took %d iterations (converged %v, err %v), want more than the %d of the coefficient fit", plattIters, plattConverged, err, base.Iterations)
+	}
+	// A cap equal to the coefficient fit's own iteration count lets it
+	// converge exactly at the cap; the Platt fit then runs out of iterations.
+	opts.MaxIter = base.Iterations
+	capped, err := FitLogistic(fit, wide, opts)
 	if err != nil {
-		t.Fatalf("FitLogistic with a separable scale set: %v", err)
+		t.Fatalf("FitLogistic: %v", err)
 	}
-	if sep.Iterations != base.Iterations || !reflect.DeepEqual(sep.Weights, base.Weights) {
-		t.Fatalf("coefficient stage differs from the baseline: %d vs %d iterations", sep.Iterations, base.Iterations)
+	if capped.Iterations != base.Iterations || !reflect.DeepEqual(capped.Weights, base.Weights) {
+		t.Fatalf("coefficient fit differs from the baseline: %d vs %d iterations", capped.Iterations, base.Iterations)
 	}
-	if sep.Converged {
-		t.Error("Converged = true although the Platt fit on a perfectly separable scale set cannot converge")
+	if capped.Converged {
+		t.Error("Converged = true although the Platt fit hit the iteration cap")
 	}
 }
 
@@ -477,9 +542,6 @@ func TestLogisticFitRefusals(t *testing.T) {
 		{"NaN L2", fit, scale, badOpts(func(o *LogisticOptions) { o.L2 = math.NaN() })},
 		{"zero MaxIter", fit, scale, badOpts(func(o *LogisticOptions) { o.MaxIter = 0 })},
 		{"zero Tol", fit, scale, badOpts(func(o *LogisticOptions) { o.Tol = 0 })},
-		{"zero LearningRate", fit, scale, badOpts(func(o *LogisticOptions) { o.LearningRate = 0 })},
-		{"Inf LearningRate", fit, scale, badOpts(func(o *LogisticOptions) { o.LearningRate = math.Inf(1) })},
-		{"diverging LearningRate", fit, scale, badOpts(func(o *LogisticOptions) { o.LearningRate = 1e308 })},
 		{"non-positive CIWeight", fit, scale, badOpts(func(o *LogisticOptions) { o.CIWeight = 0 })},
 	}
 	for _, tc := range cases {
@@ -623,5 +685,493 @@ func TestLogisticModelValidate(t *testing.T) {
 				t.Error("validate accepted an invalid model")
 			}
 		})
+	}
+}
+
+// refLoss is the log loss log(1+exp(z)) - t*z of logit z against a target t
+// in [0, 1], without overflow for large z.
+func refLoss(z, t float64) float64 {
+	if z > 30 {
+		return z + math.Log1p(math.Exp(-z)) - t*z
+	}
+	return math.Log1p(math.Exp(z)) - t*z
+}
+
+func refSigmoid(z float64) float64 { return 1 / (1 + math.Exp(-z)) }
+
+// refWeights are the per-row weights of a set: Example.Weight times the class
+// weight n/(2*positives) or n/(2*negatives). Written out here so the checks
+// below do not depend on the code under test.
+func refWeights(ex []Example) []float64 {
+	var pos, neg float64
+	for _, e := range ex {
+		if e.Label {
+			pos++
+		} else {
+			neg++
+		}
+	}
+	n := float64(len(ex))
+	out := make([]float64, len(ex))
+	for i, e := range ex {
+		class := n / (2 * neg)
+		if e.Label {
+			class = n / (2 * pos)
+		}
+		out[i] = class * e.Weight
+	}
+	return out
+}
+
+func refTargets(ex []Example) []float64 {
+	out := make([]float64, len(ex))
+	for i, e := range ex {
+		if e.Label {
+			out[i] = 1
+		}
+	}
+	return out
+}
+
+// refStandardize maps the raw features of ex through the model's recorded
+// means and scales.
+func refStandardize(m LogisticModel, ex []Example) [][]float64 {
+	out := make([][]float64, len(ex))
+	for i, e := range ex {
+		row := make([]float64, len(e.Features))
+		for j, v := range e.Features {
+			row[j] = (v - m.Means[j]) / m.Scales[j]
+		}
+		out[i] = row
+	}
+	return out
+}
+
+// refProblem evaluates the penalized objective of the logistic fit on
+// standardized rows x: sum(wt*loss)/sum(wt) + l2/(2n)*||w||^2, the bias free.
+type refProblem struct {
+	x          [][]float64
+	target, wt []float64
+	l2         float64
+}
+
+func newRefProblem(m LogisticModel, ex []Example, l2 float64) refProblem {
+	return refProblem{x: refStandardize(m, ex), target: refTargets(ex), wt: refWeights(ex), l2: l2}
+}
+
+func (p refProblem) objective(w []float64, b float64) float64 {
+	var num, den, sq float64
+	for i, row := range p.x {
+		z := b
+		for j, v := range row {
+			z += w[j] * v
+		}
+		num += p.wt[i] * refLoss(z, p.target[i])
+		den += p.wt[i]
+	}
+	for _, v := range w {
+		sq += v * v
+	}
+	return num/den + p.l2/float64(len(p.x))*sq/2
+}
+
+// gradient returns the derivative of objective with respect to each weight
+// and to the bias.
+func (p refProblem) gradient(w []float64, b float64) (gw []float64, gb float64) {
+	gw = make([]float64, len(w))
+	var den float64
+	for i, row := range p.x {
+		z := b
+		for j, v := range row {
+			z += w[j] * v
+		}
+		r := p.wt[i] * (refSigmoid(z) - p.target[i])
+		gb += r
+		for j, v := range row {
+			gw[j] += r * v
+		}
+		den += p.wt[i]
+	}
+	gb /= den
+	for j := range gw {
+		gw[j] = gw[j]/den + p.l2/float64(len(p.x))*w[j]
+	}
+	return gw, gb
+}
+
+func (p refProblem) worstGradient(w []float64, b float64) float64 {
+	gw, gb := p.gradient(w, b)
+	worst := math.Abs(gb)
+	for _, g := range gw {
+		worst = math.Max(worst, math.Abs(g))
+	}
+	return worst
+}
+
+// refPlattGradient is the gradient of the weighted mean log loss of
+// sigmoid(a*z+b) against the Platt targets (N+ + 1)/(N+ + 2) for positives and
+// 1/(N- + 2) for negatives, N+ and N- the weighted class counts.
+func refPlattGradient(z []float64, y []bool, w []float64, a, b float64) (ga, gb float64) {
+	var pos, neg, total float64
+	for i := range z {
+		if y[i] {
+			pos += w[i]
+		} else {
+			neg += w[i]
+		}
+		total += w[i]
+	}
+	hi, lo := (pos+1)/(pos+2), 1/(neg+2)
+	for i := range z {
+		target := lo
+		if y[i] {
+			target = hi
+		}
+		r := w[i] * (refSigmoid(a*z[i]+b) - target)
+		ga += r * z[i]
+		gb += r
+	}
+	return ga / total, gb / total
+}
+
+// rareShape returns n rows of 25 raw features on very different scales and
+// offsets whose label depends on the first four and is rare, as in a real
+// training run (a fraction of a percent of positives).
+func rareShape(n int, seed uint64) []Example {
+	r := rand.New(rand.NewPCG(seed, seed+1))
+	out := make([]Example, n)
+	for i := range out {
+		f := make([]float64, 25)
+		z := make([]float64, 25)
+		for j := range f {
+			z[j] = r.NormFloat64()
+			f[j] = float64(3*j) + float64(1+j%5)*z[j]
+		}
+		logit := -9 + 1.1*z[0] + 0.9*z[1] - 0.7*z[2] + 0.5*z[3]
+		out[i] = Example{Features: f, Label: r.Float64() < refSigmoid(logit), Weight: 1, Group: fmt.Sprintf("r%d-%06d", seed, i)}
+	}
+	return out
+}
+
+func positives(ex []Example) int {
+	var n int
+	for _, e := range ex {
+		if e.Label {
+			n++
+		}
+	}
+	return n
+}
+
+// rareProblem returns the fit and scale sets of the real-data shape: at least
+// 20000 fit rows, fewer than 0.1% of them positive, a scale set with a few.
+func rareProblem(t *testing.T) (fit, scale []Example) {
+	t.Helper()
+	fit, scale = rareShape(50000, 1), rareShape(8000, 3)
+	if pos := positives(fit); pos < 5 || pos*1000 >= len(fit) {
+		t.Fatalf("fixture drifted: %d positives of %d fit rows, want at least 5 and under 0.1%%", pos, len(fit))
+	}
+	if pos := positives(scale); pos < 1 {
+		t.Fatalf("fixture drifted: %d positives of %d scale rows, want at least 1", pos, len(scale))
+	}
+	return fit, scale
+}
+
+func TestLogisticFitConvergesOnRareLabels(t *testing.T) {
+	fit, scale := rareProblem(t)
+	opts := DefaultLogisticOptions()
+	m, err := FitLogistic(fit, scale, opts)
+	if err != nil {
+		t.Fatalf("FitLogistic: %v", err)
+	}
+	if !m.Converged {
+		t.Fatalf("did not converge in %d iterations (MaxIter %d)", m.Iterations, opts.MaxIter)
+	}
+	p := newRefProblem(m, fit, opts.L2)
+	if worst := p.worstGradient(m.Weights, m.Bias); !(worst < opts.Tol) {
+		t.Errorf("largest gradient component %g at the returned weights, want below %g", worst, opts.Tol)
+	}
+}
+
+func TestLogisticFitReportsAnUnfinishedFit(t *testing.T) {
+	fit, scale := rareProblem(t)
+	opts := DefaultLogisticOptions()
+	opts.MaxIter = 1
+	m, err := FitLogistic(fit, scale, opts)
+	if err != nil {
+		t.Fatalf("FitLogistic: %v", err)
+	}
+	if m.Converged {
+		t.Error("Converged = true after one iteration of a 25 feature fit")
+	}
+	if m.Iterations != 1 {
+		t.Errorf("Iterations = %d, want 1", m.Iterations)
+	}
+}
+
+func TestLogisticFitIsTheMinimumOfThePenalizedObjective(t *testing.T) {
+	r := rand.New(rand.NewPCG(7, 8))
+	draw := func(n int, prefix string) []Example {
+		out := make([]Example, n)
+		for i := range out {
+			f := []float64{r.NormFloat64(), 5 + 4*r.NormFloat64(), r.NormFloat64()}
+			logit := -1.2 + 1.0*f[0] - 0.5*(f[1]-5)/4 + 0.2*f[2]
+			w := 1.0
+			if i%5 == 0 {
+				w = 3
+			}
+			out[i] = Example{Features: f, Label: r.Float64() < refSigmoid(logit), Weight: w, Group: fmt.Sprintf("%s%03d", prefix, i)}
+		}
+		return out
+	}
+	fit, scale := draw(200, "f"), draw(100, "s")
+	for _, l2 := range []float64{0.5, 1, 20} {
+		t.Run(fmt.Sprintf("L2=%v", l2), func(t *testing.T) {
+			opts := DefaultLogisticOptions()
+			opts.L2 = l2
+			m, err := FitLogistic(fit, scale, opts)
+			if err != nil {
+				t.Fatalf("FitLogistic: %v", err)
+			}
+			if !m.Converged {
+				t.Fatalf("did not converge in %d iterations", m.Iterations)
+			}
+			p := newRefProblem(m, fit, l2)
+			gw, gb := p.gradient(m.Weights, m.Bias)
+			for j, g := range gw {
+				if math.Abs(g) >= 1e-9 {
+					t.Errorf("gradient for weight %d = %g, want below 1e-9", j, g)
+				}
+			}
+			if math.Abs(gb) >= 1e-9 {
+				t.Errorf("gradient for the bias = %g, want below 1e-9", gb)
+			}
+			base := p.objective(m.Weights, m.Bias)
+			const step = 1e-4
+			for j := range m.Weights {
+				for _, sign := range []float64{1, -1} {
+					w := append([]float64(nil), m.Weights...)
+					w[j] += sign * step
+					if got := p.objective(w, m.Bias); !(got > base) {
+						t.Errorf("weight %d moved by %+g: objective %.17g, want above %.17g", j, sign*step, got, base)
+					}
+				}
+			}
+			for _, sign := range []float64{1, -1} {
+				if got := p.objective(m.Weights, m.Bias+sign*step); !(got > base) {
+					t.Errorf("bias moved by %+g: objective %.17g, want above %.17g", sign*step, got, base)
+				}
+			}
+		})
+	}
+}
+
+func TestLogisticPlattFitsTheSmoothedTargets(t *testing.T) {
+	r := rand.New(rand.NewPCG(5, 6))
+	overlap := func(nPos, nNeg int) (z []float64, y []bool) {
+		for i := 0; i < nPos; i++ {
+			z, y = append(z, 0.7+r.NormFloat64()), append(y, true)
+		}
+		for i := 0; i < nNeg; i++ {
+			z, y = append(z, -0.7+r.NormFloat64()), append(y, false)
+		}
+		return z, y
+	}
+	balancedZ, balancedY := overlap(40, 40)
+	skewZ, skewY := overlap(3, 7)
+	// One positive whose logit lies above every negative: the unpenalized
+	// maximum likelihood slope is infinite. Class weights as FitLogistic
+	// gives them: 10/(2*1) for the positive, 10/(2*9) for each negative.
+	loneZ := []float64{4, -4, -3.5, -3, -2.5, -2, -1.5, -1, -0.5, -0.2}
+	loneY := []bool{true, false, false, false, false, false, false, false, false, false}
+	loneW := []float64{5}
+	for i := 0; i < 9; i++ {
+		loneW = append(loneW, 10.0/18)
+	}
+	cases := []struct {
+		name string
+		z    []float64
+		y    []bool
+		w    []float64
+	}{
+		{"balanced scale set", balancedZ, balancedY, ones(len(balancedZ))},
+		{"three positives of ten", skewZ, skewY, ones(len(skewZ))},
+		{"one positive, perfectly separated", loneZ, loneY, loneW},
+	}
+	opts := DefaultLogisticOptions()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b, _, conv, err := fitPlatt(tc.z, tc.y, tc.w, opts)
+			if err != nil {
+				t.Fatalf("fitPlatt: %v", err)
+			}
+			if !conv {
+				t.Fatalf("fitPlatt did not converge (a=%v b=%v)", a, b)
+			}
+			if !isFinite(a) || !isFinite(b) {
+				t.Fatalf("a=%v b=%v, want finite", a, b)
+			}
+			ga, gb := refPlattGradient(tc.z, tc.y, tc.w, a, b)
+			if math.Abs(ga) >= opts.Tol || math.Abs(gb) >= opts.Tol {
+				t.Errorf("gradient (%g, %g) at a=%v b=%v, want below %g in both components", ga, gb, a, b, opts.Tol)
+			}
+		})
+	}
+}
+
+func TestLogisticFitWithOneScalePositiveIsFinite(t *testing.T) {
+	fit, _ := separable()
+	scale := []Example{{Features: []float64{3, -3}, Label: true, Weight: 1, Group: "s-p"}}
+	for i := 0; i < 40; i++ {
+		scale = append(scale, Example{Features: []float64{-3, 3}, Label: false, Weight: 1, Group: fmt.Sprintf("s-n%02d", i)})
+	}
+	opts := DefaultLogisticOptions()
+	m, err := FitLogistic(fit, scale, opts)
+	if err != nil {
+		t.Fatalf("FitLogistic: %v", err)
+	}
+	if !m.Converged {
+		t.Fatal("Converged = false for a scale set with one positive")
+	}
+	if !isFinite(m.PlattA) || !isFinite(m.PlattB) || !(m.PlattA > 0) {
+		t.Fatalf("platt a=%v b=%v, want finite with a positive slope", m.PlattA, m.PlattB)
+	}
+	logits := make([]float64, len(scale))
+	y := make([]bool, len(scale))
+	for i, e := range scale {
+		logits[i], y[i] = m.logit(e.Features), e.Label
+	}
+	ga, gb := refPlattGradient(logits, y, refWeights(scale), m.PlattA, m.PlattB)
+	if math.Abs(ga) >= opts.Tol || math.Abs(gb) >= opts.Tol {
+		t.Errorf("platt gradient (%g, %g), want below %g in both components", ga, gb, opts.Tol)
+	}
+}
+
+// TestLogisticDescendReportsConvergenceHonestly: converged means the largest
+// gradient component is below Tol at the returned point, and a run stopped by
+// MaxIter before that says so.
+func TestLogisticDescendReportsConvergenceHonestly(t *testing.T) {
+	fit, _ := separable()
+	_, _, x, err := standardize(fit)
+	if err != nil {
+		t.Fatalf("standardize: %v", err)
+	}
+	opts := DefaultLogisticOptions()
+	p := logisticProblem{x: x, y: labelTargets(exampleLabels(fit)), w: ones(len(fit)), l2: opts.L2}
+	ref := refProblem{x: x, target: refTargets(fit), wt: ones(len(fit)), l2: opts.L2}
+
+	w, b, iters, converged, err := descend(p, make([]float64, 2), 0, opts)
+	if err != nil {
+		t.Fatalf("descend: %v", err)
+	}
+	if !converged || iters <= 0 {
+		t.Fatalf("converged %v after %d iterations, want true after at least one", converged, iters)
+	}
+	if worst := ref.worstGradient(w, b); !(worst < opts.Tol) {
+		t.Errorf("converged = true with the largest gradient component %g, want below %g", worst, opts.Tol)
+	}
+
+	// Started at the optimum there is nothing left to do.
+	if _, _, again, converged, err := descend(p, w, b, opts); err != nil || !converged || again != 0 {
+		t.Errorf("descend from the optimum: iterations %d converged %v err %v, want 0 true nil", again, converged, err)
+	}
+
+	opts.MaxIter = 1
+	w1, b1, iters, converged, err := descend(p, make([]float64, 2), 0, opts)
+	if err != nil {
+		t.Fatalf("descend with MaxIter 1: %v", err)
+	}
+	if converged || iters != 1 {
+		t.Errorf("MaxIter 1: converged %v after %d iterations, want false after 1", converged, iters)
+	}
+	if worst := ref.worstGradient(w1, b1); !(worst >= opts.Tol) {
+		t.Errorf("unfinished run reports the largest gradient component %g, want at least %g", worst, opts.Tol)
+	}
+}
+
+// TestLogisticDescendFindsTheSameOptimumFromAnyStart: the objective is strictly
+// convex, so a start deep in the flat tails of the sigmoid, where a full
+// Newton step is huge and overshoots, must still reach the optimum found from
+// zero. Only the line search makes that so.
+func TestLogisticDescendFindsTheSameOptimumFromAnyStart(t *testing.T) {
+	fit, _ := separable()
+	_, _, x, err := standardize(fit)
+	if err != nil {
+		t.Fatalf("standardize: %v", err)
+	}
+	opts := DefaultLogisticOptions()
+	p := logisticProblem{x: x, y: labelTargets(exampleLabels(fit)), w: ones(len(fit)), l2: opts.L2}
+	want, wantBias, _, _, err := descend(p, make([]float64, 2), 0, opts)
+	if err != nil {
+		t.Fatalf("descend from zero: %v", err)
+	}
+	starts := []struct {
+		w    [2]float64
+		bias float64
+	}{
+		{[2]float64{3, -3}, 1},
+		{[2]float64{8, -8}, 3},
+		{[2]float64{-15, -15}, 20},
+		{[2]float64{100, 100}, -50},
+	}
+	for _, s := range starts {
+		t.Run(fmt.Sprintf("start %v %v", s.w, s.bias), func(t *testing.T) {
+			w, b, _, converged, err := descend(p, s.w[:], s.bias, opts)
+			if err != nil {
+				t.Fatalf("descend: %v", err)
+			}
+			if !converged {
+				t.Fatal("did not converge")
+			}
+			if !approx(w[0], want[0], 1e-6) || !approx(w[1], want[1], 1e-6) || !approx(b, wantBias, 1e-6) {
+				t.Errorf("optimum w=%v b=%v, want w=%v b=%v", w, b, want, wantBias)
+			}
+		})
+	}
+}
+
+func TestLogisticBacktrackRefusesAHopelessStep(t *testing.T) {
+	fit, _ := separable()
+	_, _, x, err := standardize(fit)
+	if err != nil {
+		t.Fatalf("standardize: %v", err)
+	}
+	p := logisticProblem{x: x, y: labelTargets(exampleLabels(fit)), w: ones(len(fit)), l2: 1}
+	total := float64(len(fit))
+	cur := p.evaluate(make([]float64, 3), total)
+	// Even halved sixty times, a step of 1e30 lands far out on the flat tail
+	// of the sigmoid where the loss is far above the starting loss.
+	if next, ok := p.backtrack(cur, []float64{1e30, 1e30, 1e30}, total); ok {
+		t.Errorf("backtrack accepted a hopeless step (loss %v from %v)", next.loss, cur.loss)
+	}
+	step, err := p.newtonStep(cur, total)
+	if err != nil {
+		t.Fatalf("newtonStep: %v", err)
+	}
+	next, ok := p.backtrack(cur, step, total)
+	if !ok || !(next.loss < cur.loss) {
+		t.Errorf("backtrack on the Newton step: ok %v, loss %v from %v, want a lower loss", ok, next.loss, cur.loss)
+	}
+}
+
+func TestLogisticFitRefusesASingularSystem(t *testing.T) {
+	fit, scale := separable()
+	widen := func(in []Example) []Example {
+		out := make([]Example, len(in))
+		for i, e := range in {
+			e.Features = append(append([]float64(nil), e.Features...), 7)
+			out[i] = e
+		}
+		return out
+	}
+	opts := DefaultLogisticOptions()
+	opts.L2 = 0
+	_, err := FitLogistic(widen(fit), widen(scale), opts)
+	if err == nil || !strings.Contains(err.Error(), "positive definite") {
+		t.Fatalf("FitLogistic with an unpenalized constant column: err = %v, want a positive definite error", err)
+	}
+	// The default penalty keeps the same system solvable.
+	if _, err := FitLogistic(widen(fit), widen(scale), DefaultLogisticOptions()); err != nil {
+		t.Errorf("FitLogistic with the default penalty: %v", err)
 	}
 }

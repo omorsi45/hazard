@@ -175,12 +175,12 @@ func TestArtifactDigestIsTheHashOfTheCanonicalJSON(t *testing.T) {
 	const staticJSON = `{"schema":1,"feature_version":"f2","model":{"x":[0.1,0.5,2],"y":[0.05,0.25,0.75]},` +
 		`"training":{"cutoff":"2026-09-01","fit_groups":["c1","c2","c3"],"scale_groups":["c4"],"positives":3,"negatives":9,` +
 		`"sources":{"ci":2,"mutation":10},"created_at":"2026-10-28T12:00:00Z",` +
-		`"options":{"l2":0,"ci_weight":0,"max_iter":0,"tol":0,"learning_rate":0}},"digest":""}`
+		`"options":{"l2":0,"ci_weight":0,"max_iter":0,"tol":0}},"digest":""}`
 	const logisticJSON = `{"schema":1,"feature_version":"f2","model":{"feature_version":"f2","means":[1,2],"scales":[2,4],` +
 		`"weights":[1,-1],"bias":0.5,"platt_a":2,"platt_b":-1,"iterations":10,"converged":true},` +
 		`"training":{"cutoff":"2026-09-01","fit_groups":["c1","c2","c3"],"scale_groups":["c4"],"positives":3,"negatives":9,` +
 		`"sources":{"ci":2,"mutation":10},"created_at":"2026-10-28T12:00:00Z",` +
-		`"options":{"l2":1,"ci_weight":10,"max_iter":5000,"tol":1e-9,"learning_rate":0.1}},"digest":""}`
+		`"options":{"l2":1,"ci_weight":10,"max_iter":5000,"tol":1e-9}},"digest":""}`
 
 	sp := filepath.Join(dir, "static.json")
 	if err := WriteStatic(sp, sampleStatic()); err != nil {
