@@ -49,15 +49,7 @@ Python repositories need Python 3.11 or newer with pytest and coverage.py. CI pi
 
 ## Quick start
 
-A Go-only repository needs one line of configuration. By default both languages are enabled, and a Go-only repository would otherwise get a pytest run that fails with `file or directory not found: tests`.
-
-```yaml
-# hazard.yml
-version: 1
-languages:
-  python:
-    enabled: false
-```
+No configuration is required. Both languages are enabled by default, and a repository that holds no Python file runs its Go suite alone: `hazard run` leaves pytest out of a full-suite run and prints a `python_absent` warning. A single Python file keeps pytest in.
 
 Build the index. `--coverage` runs the test suite: one baseline `go test`, then one `go test` per top-level Go test (and one pytest run under coverage.py for Python).
 

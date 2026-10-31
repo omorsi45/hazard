@@ -2,7 +2,7 @@
 
 Hazard narrows a test run by driving the project's own runner. It has two adapters, `go test` and pytest. This page describes how each one turns a selection into native commands, what it does when the selection cannot be expressed, and which arguments you may pass through. It is written for people who run `hazard run` in CI or who write a new adapter.
 
-`hazard run --runner auto` runs every enabled language, Go first and then Python. `--runner gotest` and `--runner pytest` restrict the run to one adapter. A narrowed run executes only the adapters that have selected tests, and a full-suite decision executes every enabled adapter's full suite.
+`hazard run --runner auto` runs every enabled language, Go first and then Python. `--runner gotest` and `--runner pytest` restrict the run to one adapter. A narrowed run executes only the adapters that have selected tests, and a full-suite decision executes every enabled adapter's full suite (pytest is left out when the repository holds no Python file, see [Configuring a single-language repository](#configuring-a-single-language-repository)).
 
 ## Versions
 
@@ -118,7 +118,9 @@ Other flags pass through unchanged. `-race`, `-count=1` and `-vet=off` are accep
 
 ## Configuring a single-language repository
 
-Both languages are enabled by default. A Go-only repository must disable Python in `hazard.yml`. Otherwise a full run also starts pytest, which fails with `file or directory not found: tests` and exits 4. A Python-only repository should disable Go the same way, with `languages.go.enabled: false`.
+Both languages are enabled by default, and a Go-only repository needs no configuration. Under `--runner auto`, a full-suite run leaves the pytest job out when Go still runs and git lists no Python file in the repository (`git ls-files -co --exclude-standard -- '*.py'`, ignoring `.hazard/`: tracked files and untracked files that are not ignored). `hazard run` then prints the warning `python_absent` and runs Go alone. If git cannot be asked, or a single Python file exists, pytest runs as before, so a Python project whose `languages.python.testpaths` is wrong stays red with `file or directory not found`. `--runner pytest` always runs pytest, and a narrowed run is not affected: it runs only the adapters that have selected tests.
+
+A Python-only repository should disable Go in `hazard.yml`, with `languages.go.enabled: false`. A Go-only repository can still disable Python explicitly to skip the check:
 
 ```yaml
 version: 1

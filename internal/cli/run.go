@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -325,9 +326,12 @@ func fullSuiteDecision(reason string) (engine.Decision, error) {
 // widens the whole run to the full suite: limited is true.
 func (x *execution) jobsFor(d engine.Decision, langs []string) (jobs []job, limited bool) {
 	full := func() []job {
-		out := make([]job, len(langs))
-		for i, lang := range langs {
-			out[i] = job{lang: lang, full: true}
+		out := make([]job, 0, len(langs))
+		for _, lang := range langs {
+			if lang == langPython && x.leavePytestOut(langs) {
+				continue
+			}
+			out = append(out, job{lang: lang, full: true})
 		}
 		return out
 	}
@@ -357,6 +361,29 @@ func (x *execution) jobsFor(d engine.Decision, langs []string) (jobs []job, limi
 		}
 	}
 	return jobs, false
+}
+
+// leavePytestOut reports whether the full Python job is left out because the
+// repository holds nothing for pytest to run. That is only so under --runner
+// auto, with another adapter still running, and when git lists no Python file
+// outside .hazard that is tracked or untracked and not ignored. Any doubt
+// (git fails, a Python file exists) keeps pytest in: a misconfigured Python
+// project must stay red, and --runner pytest always runs it.
+func (x *execution) leavePytestOut(langs []string) bool {
+	if x.rf.runner != "auto" || !slices.Contains(langs, langGo) || !noPythonFiles(x.ctx, x.root) {
+		return false
+	}
+	x.warnf("python_absent: the repository holds no Python file, so pytest was not run (--runner pytest runs it anyway)")
+	return true
+}
+
+// noPythonFiles is true when git lists no Python source file in dir that is
+// tracked, or untracked and not ignored, outside .hazard.
+func noPythonFiles(ctx context.Context, dir string) bool {
+	cmd := exec.CommandContext(ctx, "git", "ls-files", "-co", "--exclude-standard", "-z", "--", "*.py", ":(exclude).hazard")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return err == nil && len(out) == 0
 }
 
 func (x *execution) announce(d engine.Decision, jobs []job) {

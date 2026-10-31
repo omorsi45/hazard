@@ -99,8 +99,9 @@ func junitXML(suite string, cases ...string) string {
 	return b.String()
 }
 
-// rig is a run command wired to a fake selector and fake runners inside an
-// empty git repository.
+// rig is a run command wired to a fake selector and fake runners inside a git
+// repository that holds one Python file (pythonMarker), so both adapters have
+// something to run. A test of a Go-only repository removes it.
 type rig struct {
 	t        *testing.T
 	root     string
@@ -109,9 +110,20 @@ type rig struct {
 	log      []string
 }
 
+// pythonMarker is the Python file every rig repository starts with.
+const pythonMarker = "app.py"
+
+func addPythonMarker(t *testing.T, root string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, pythonMarker), []byte("print(1)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newRig(t *testing.T, d engine.Decision) *rig {
 	t.Helper()
 	r := &rig{t: t, root: chdirRepo(t), sel: &fakeSelect{d: d}}
+	addPythonMarker(t, r.root)
 	r.gor = &fakeRun{name: "go", log: &r.log}
 	r.pyr = &fakeRun{name: "python", log: &r.log}
 	return r
@@ -232,6 +244,102 @@ func TestRunFullSuiteDecisionRunsTheNativeFullSuites(t *testing.T) {
 	if !p.Full || len(p.Targets) != 0 || !reflect.DeepEqual(p.Testpaths, []string{"spec"}) || !reflect.DeepEqual(p.PytestArgs, []string{"-x"}) {
 		t.Errorf("python request = %+v", p)
 	}
+}
+
+// goOnly makes the rig repository a Go-only one: no Python file is left in it.
+func (r *rig) goOnly() {
+	r.t.Helper()
+	if err := os.Remove(filepath.Join(r.root, pythonMarker)); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// TestRunFullSuiteOfAGoOnlyRepositoryLeavesPytestOut: with the default
+// configuration Python is enabled with testpaths "tests", but a repository
+// that holds no Python file has nothing for pytest to run. The full suite runs
+// Go alone and says why. Any Python file keeps pytest in: a misconfigured
+// Python project stays red.
+func TestRunFullSuiteOfAGoOnlyRepositoryLeavesPytestOut(t *testing.T) {
+	t.Run("no Python file", func(t *testing.T) {
+		r := newRig(t, fullDecision())
+		r.goOnly()
+		r.config("")
+
+		code, _, errOut := r.run("--full")
+
+		if code != 0 {
+			t.Fatalf("code=%d err=%q", code, errOut)
+		}
+		wantLog(t, r.log, "go")
+		if !strings.Contains(errOut, "warning: python_absent") {
+			t.Errorf("stderr = %q, want the python_absent warning", errOut)
+		}
+	})
+	t.Run("a full-suite decision from the selector is the same", func(t *testing.T) {
+		r := newRig(t, fullDecision())
+		r.goOnly()
+
+		code, _, errOut := r.run()
+
+		if code != 0 {
+			t.Fatalf("code=%d err=%q", code, errOut)
+		}
+		wantLog(t, r.log, "go")
+	})
+	t.Run("one Python file keeps pytest", func(t *testing.T) {
+		r := newRig(t, fullDecision())
+		r.goOnly()
+		if err := os.WriteFile(filepath.Join(r.root, "tool.py"), []byte("print(2)\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		code, _, errOut := r.run("--full")
+
+		if code != 0 {
+			t.Fatalf("code=%d err=%q", code, errOut)
+		}
+		wantLog(t, r.log, "go", "python")
+		if strings.Contains(errOut, "python_absent") {
+			t.Errorf("stderr = %q, want no python_absent warning", errOut)
+		}
+	})
+	t.Run("Python files that are ignored or under .hazard do not count", func(t *testing.T) {
+		r := newRig(t, fullDecision())
+		r.goOnly()
+		for name, content := range map[string]string{".gitignore": "ignored.py\n", "ignored.py": "x = 1\n", ".hazard/state.py": "x = 2\n"} {
+			full := filepath.Join(r.root, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if code, _, errOut := r.run("--full"); code != 0 {
+			t.Fatalf("code=%d err=%q", code, errOut)
+		}
+		wantLog(t, r.log, "go")
+	})
+	t.Run("--runner pytest always runs pytest", func(t *testing.T) {
+		r := newRig(t, fullDecision())
+		r.goOnly()
+
+		if code, _, errOut := r.run("--full", "--runner", "pytest"); code != 0 {
+			t.Fatalf("code=%d err=%q", code, errOut)
+		}
+		wantLog(t, r.log, "python")
+	})
+	t.Run("pytest is not left out when it is the only adapter", func(t *testing.T) {
+		r := newRig(t, fullDecision())
+		r.goOnly()
+		r.config("languages:\n  go:\n    enabled: false\n")
+
+		if code, _, errOut := r.run("--full"); code != 0 {
+			t.Fatalf("code=%d err=%q", code, errOut)
+		}
+		wantLog(t, r.log, "python")
+	})
 }
 
 func TestRunRunnerFlagAndEnabledLanguages(t *testing.T) {
@@ -458,6 +566,7 @@ func TestRunNoFallbackWithALockProblemExits3WithoutRunning(t *testing.T) {
 
 func TestRunForcedFullSkipsSelection(t *testing.T) {
 	root := chdirRepo(t)
+	addPythonMarker(t, root)
 	head := commitEmpty(t, root)
 	sel := &fakeSelect{d: narrowedDecision()}
 	var log []string
@@ -1097,5 +1206,38 @@ func TestRunEndToEndOnTheGoFixture(t *testing.T) {
 	recs, err = telemetry.Read(filepath.Join(dir, ".hazard", "runs.jsonl"))
 	if err != nil || len(recs) != 2 || recs[1].RunnerExit == nil || *recs[1].RunnerExit != 1 {
 		t.Errorf("telemetry = %+v, err %v; want a second record with runner_exit 1", recs, err)
+	}
+}
+
+// TestRunFullSuiteEndToEndOnAGoOnlyRepositoryWithTheDefaultConfiguration: the
+// whole configuration is "version: 1", so Python is enabled with testpaths
+// "tests" in a repository that has no Python at all. The full suite runs Go,
+// leaves pytest out with a warning and exits 0.
+func TestRunFullSuiteEndToEndOnAGoOnlyRepositoryWithTheDefaultConfiguration(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "repo")
+	copyFixtureTree(t, filepath.Join("..", "..", "testdata", "repos", "go"), dir)
+	for name, content := range map[string]string{"hazard.yml": "version: 1\n", ".gitignore": ".hazard/\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitTest(t, dir, "init", "-q", "-b", "main")
+	gitTest(t, dir, "add", "-A")
+	gitTest(t, dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
+	if listed := gitTest(t, dir, "ls-files", "*.py"); listed != "" {
+		t.Fatalf("fixture: the Go fixture holds Python files: %s", listed)
+	}
+	t.Chdir(dir)
+
+	code, out, errOut := invoke(context.Background(), "run", "--full")
+
+	if code != 0 {
+		t.Fatalf("code=%d out=%q err=%q, want a green Go-only run", code, out, errOut)
+	}
+	if !strings.Contains(errOut, "python_absent") || strings.Contains(errOut, "file or directory not found") {
+		t.Errorf("stderr = %q, want the python_absent warning and no pytest failure", errOut)
+	}
+	if cases := parseJUnitFile(t, filepath.Join(dir, ".hazard", "junit.xml")); len(cases) < 8 {
+		t.Errorf("JUnit cases = %d, want the whole Go fixture suite", len(cases))
 	}
 }
