@@ -63,11 +63,14 @@ const (
 	reasonShadowMode    = "shadow"
 )
 
-// lockReasons are the full-suite reasons that mean no calibrated lock could be
-// used. With --no-fallback they end the command with exit 3 before any test runs.
+// lockReasons are the full-suite reasons that mean the calibrated lock could
+// not be used: it is missing or unusable, no longer matches the running system,
+// or its predictor could not be built or gave no usable answer. With
+// --no-fallback they end the command with exit 3 before any test runs.
 var lockReasons = map[string]bool{
-	"no_lock": true, "lock_corrupt": true, "lock_error": true, "lock_unsupported": true,
+	"no_lock": true, "lock_corrupt": true, "lock_error": true,
 	"model_drift": true, "rubric_mismatch": true, "feature_mismatch": true, "policy_mismatch": true,
+	"predictor_unavailable": true, "predictor_error": true,
 }
 
 const (

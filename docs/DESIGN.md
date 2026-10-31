@@ -153,7 +153,7 @@ Every row degrades toward running more tests. The reason is what telemetry and `
 | `--shadow` | the full suite runs, and the hypothetical selection is recorded | `shadow`, or the reason that already applied |
 | a test has an unstable identity or is quarantined | the test is always selected | `unstable_id`, `quarantined` |
 
-With `--no-fallback`, a missing or unusable lock ends `hazard run` with exit code 3 and nothing runs.
+With `--no-fallback`, a missing or unusable lock, a lock that no longer matches the running system, or a locked predictor that is unavailable or fails (`predictor_unavailable`, `predictor_error`, such as an unset API key or a spent budget) ends `hazard run` with exit code 3 and nothing runs.
 
 ### How this matrix differs from the original
 

@@ -428,7 +428,7 @@ func TestRunSelectionErrors(t *testing.T) {
 }
 
 func TestRunNoFallbackWithALockProblemExits3WithoutRunning(t *testing.T) {
-	for _, reason := range []string{"no_lock", "lock_corrupt", "lock_error", "lock_unsupported", "model_drift", "rubric_mismatch", "feature_mismatch", "policy_mismatch"} {
+	for _, reason := range []string{"no_lock", "lock_corrupt", "lock_error", "model_drift", "rubric_mismatch", "feature_mismatch", "policy_mismatch", "predictor_unavailable", "predictor_error"} {
 		t.Run(reason, func(t *testing.T) {
 			d := fullDecision()
 			d.AbstainReason = reason
