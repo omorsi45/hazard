@@ -94,25 +94,24 @@ func decodeAudit(raw []byte) (auditRecord, error) {
 
 // driftFor judges the field miss rate of the selections made under lock l
 // from the audit log of repoDir. Drift that cannot be judged (an unreadable
-// log) is an alarm, never a quiet pass: unknown never narrows. With
-// control.drift.escalate_if_ucb_above_alpha off the status is kept for the
-// warnings but Alarm is cleared.
+// log) is an alarm, never a quiet pass: unknown never narrows, whatever
+// control.drift.escalate_if_ucb_above_alpha says. That flag governs only the
+// escalation of an upper bound above alpha: with it off the status of a bound
+// is kept for the warnings but Alarm is cleared.
 func driftFor(repoDir string, cfg config.Config, l control.Lock) (control.DriftStatus, []string) {
 	obs, warnings, err := readObservations(auditsPath(repoDir))
-	var status control.DriftStatus
 	if err != nil {
 		warnings = append(warnings, "drift_unknown: "+err.Error())
-		status = control.DriftStatus{State: driftStateAlarm, UCB: 1, Alarm: true}
-	} else {
-		status = control.Monitor(obs, l.Digest, cfg.Control.Drift.WindowRuns, l.Alpha, l.Delta)
-		if status.Alarm {
-			warnings = append(warnings, fmt.Sprintf("drift: alarm after %d audited selections with %d misses (upper bound %.4f, alpha %g)",
-				status.N, status.Misses, status.UCB, l.Alpha))
-		}
+		return control.DriftStatus{State: driftStateAlarm, UCB: 1, Alarm: true}, warnings
 	}
-	if status.Alarm && !cfg.Control.Drift.EscalateIfUCBAboveAlpha {
-		status.Alarm = false
-		warnings = append(warnings, "drift: not escalated because control.drift.escalate_if_ucb_above_alpha is false")
+	status := control.Monitor(obs, l.Digest, cfg.Control.Drift.WindowRuns, l.Alpha, l.Delta)
+	if status.Alarm {
+		warnings = append(warnings, fmt.Sprintf("drift: alarm after %d audited selections with %d misses (upper bound %.4f, alpha %g)",
+			status.N, status.Misses, status.UCB, l.Alpha))
+		if !cfg.Control.Drift.EscalateIfUCBAboveAlpha {
+			status.Alarm = false
+			warnings = append(warnings, "drift: not escalated because control.drift.escalate_if_ucb_above_alpha is false")
+		}
 	}
 	return status, warnings
 }

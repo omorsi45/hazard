@@ -409,8 +409,7 @@ func TestSelectDriftThatIsNotEscalatedOnlyWarns(t *testing.T) {
 	f, lock := logisticFixture(t, yml, nil)
 
 	for name, lines := range map[string][]string{
-		"a confirmed miss":      {auditLine("s1", lock.Digest, []string{idTop}, true)},
-		"an unreadable history": {"{broken"},
+		"a confirmed miss": {auditLine("s1", lock.Digest, []string{idTop}, true)},
 	} {
 		writeAuditsFile(t, f, lines...)
 
@@ -422,6 +421,26 @@ func TestSelectDriftThatIsNotEscalatedOnlyWarns(t *testing.T) {
 		if !hasWarning(d, "drift") {
 			t.Errorf("%s: Warnings = %v, want the drift status as a warning", name, d.Warnings)
 		}
+	}
+}
+
+// TestSelectUnreadableAuditLogIsDriftEvenWhenNotEscalated: the flag
+// control.drift.escalate_if_ucb_above_alpha governs the escalation of an upper
+// bound above alpha. An audit log that cannot be read is no bound at all but an
+// unknown, and unknown never narrows.
+func TestSelectUnreadableAuditLogIsDriftEvenWhenNotEscalated(t *testing.T) {
+	t.Parallel()
+	yml := lockedYML + "control:\n  drift:\n    escalate_if_ucb_above_alpha: false\n"
+	f, lock := logisticFixture(t, yml, nil)
+	writeAuditsFile(t, f, auditLine("s1", lock.Digest, nil, true))
+	requireNarrowed(t, selectWith(t, f, nil), "an intact audit log")
+
+	writeAuditsFile(t, f, "{broken")
+
+	d := selectWith(t, f, nil)
+	requireFullSuite(t, d, "drift")
+	if !hasWarning(d, "drift_unknown: ") {
+		t.Errorf("Warnings = %v, want drift_unknown", d.Warnings)
 	}
 }
 

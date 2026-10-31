@@ -175,8 +175,8 @@ func TestDriftForAnAuditHistory(t *testing.T) {
 			auditLine("s1", lockDigest, miss, true) + "\n" + auditLine("s2", lockDigest, nil, true) + "\n", false, want{state: "warming", n: 1}},
 		{"an unreadable history is an unknown drift that alarms", escalating,
 			auditLine("s1", lockDigest, nil, true) + "\n{broken\n" + auditLine("s2", lockDigest, nil, true) + "\n", false, want{"alarm", true, 0, 0, "drift_unknown: "}},
-		{"an unreadable history only warns when drift is not escalated", quiet,
-			"{broken\n" + auditLine("s2", lockDigest, nil, true) + "\n", false, want{"alarm", false, 0, 0, "drift_unknown: "}},
+		{"an unreadable history alarms even when drift is not escalated", quiet,
+			"{broken\n" + auditLine("s2", lockDigest, nil, true) + "\n", false, want{"alarm", true, 0, 0, "drift_unknown: "}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
