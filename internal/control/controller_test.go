@@ -135,9 +135,12 @@ func TestG07TriggerBeatsEveryProbability(t *testing.T) {
 	}
 }
 
-// G01 to G04 at decision level: each failed lock check abstains to the full
-// suite with that reason, whatever the probabilities say.
-func TestG01ToG04LockFailureAbstains(t *testing.T) {
+// TestLockFailureReasonsAbstain: Decide turns the reason of a failed lock check
+// into the full suite, whatever the probabilities say. The reason is handed in,
+// so this test cannot show that a lock check detects anything: Verify is proven
+// by the TestVerify* tests of lock_test.go and, end to end, by the engine
+// guards TestGuardG01 to TestGuardG04.
+func TestLockFailureReasonsAbstain(t *testing.T) {
 	for _, reason := range []string{"lock_corrupt", "model_drift", "rubric_mismatch", "feature_mismatch"} {
 		t.Run(reason, func(t *testing.T) {
 			in := withCandidates(baseInput(), Candidate{TestID: "t10", P: 0.9})

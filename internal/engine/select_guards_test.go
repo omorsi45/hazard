@@ -1,11 +1,13 @@
 package engine
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/omorsi45/hazard/internal/control"
+	"github.com/omorsi45/hazard/internal/impact"
 	"github.com/omorsi45/hazard/internal/predict"
 )
 
@@ -190,15 +192,43 @@ func TestGuardG06FailedShardSelectsItsCandidates(t *testing.T) {
 }
 
 // G07: a full-suite trigger wins over a valid lock and a predictor that is
-// sure everything breaks.
+// sure a test breaks. go.mod changes no package, so with the trigger gone the
+// selection is only what the predictor names, and that one test out of five
+// saves far more than min_saving_ratio: removing any trigger layer shows as a
+// narrowed decision, not as an unrelated abstention.
 func TestGuardG07TriggerForcesTheFullSuite(t *testing.T) {
 	t.Parallel()
-	f := newFixture(t, map[string]string{"hazard.yml": lockedYML})
-	f.write(t, map[string]string{"go.mod": "module example.com/m\n\ngo 1.21\n\n// touched\n"})
-	f.indexNow(t, false)
-	f.logistic(t, defaultWeight, defaultBias)
-	f.writeLock(t, "logistic", nil)
-	p := fixedP(1.0)
+	touchedGoMod := map[string]string{"go.mod": "module example.com/m\n\ngo 1.21\n\n// touched\n"}
+	build := func(t *testing.T, yml string) *fixture {
+		t.Helper()
+		f := newFixture(t, map[string]string{"hazard.yml": yml})
+		f.write(t, touchedGoMod)
+		f.indexNow(t, false)
+		f.logistic(t, defaultWeight, defaultBias)
+		f.writeLock(t, "logistic", nil)
+		return f
+	}
+	// A predictor that is sure top breaks and that nothing else does.
+	sureOfTop := func() *stubPredictor {
+		return &stubPredictor{fn: func(_ context.Context, cands []impact.Candidate) ([]predict.Prob, error) {
+			out := make([]predict.Prob, len(cands))
+			for i, c := range cands {
+				out[i] = predict.Prob{TestID: c.TestID, Source: "stub", Shard: -1}
+				if c.TestID == idTop {
+					out[i].P = 1
+				}
+			}
+			return out, nil
+		}}
+	}
+
+	// The premise: the same change and predictor, with go.mod not a trigger
+	// (a pattern that matches nothing here), narrow to the one test.
+	open := build(t, lockedYML+"repo:\n  full_suite_triggers: [\"Dockerfile*\"]\n")
+	requireNarrowed(t, selectWith(t, open, func(o *Options) { o.load = stubLoader(sureOfTop()) }), "go.mod is not a trigger")
+
+	f := build(t, lockedYML)
+	p := sureOfTop()
 
 	d := selectWith(t, f, func(o *Options) { o.load = stubLoader(p) })
 
