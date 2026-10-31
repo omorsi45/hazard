@@ -814,6 +814,7 @@ func TestCalibrateEndToEndAcceptance(t *testing.T) {
 		{"EmpiricalMissRate", lock.EmpiricalMissRate, 0.0}, {"Unit", lock.Unit, "commit"}, {"Split", lock.Split, "temporal"},
 		{"SplitAt", lock.SplitAt, "2026-09-01"}, {"Predictor", lock.Predictor, "static"}, {"ModelVersion", lock.ModelVersion, "p0"},
 		{"RubricVersion", lock.RubricVersion, "none"}, {"CalibrationIDs", lock.CalibrationIDs, wantIDs},
+		{"L1Mode", lock.L1Mode, "graph"},
 	}
 	for _, c := range checks {
 		if !reflect.DeepEqual(c.got, c.want) {
@@ -835,7 +836,7 @@ func TestCalibrateEndToEndAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id.PolicyDigest = engine.BuildPolicy(cfg, "static").Digest()
+	id.PolicyDigest = engine.BuildPolicy(cfg, "static", impact.ModeGraph).Digest()
 	if reason := lock.Verify(id); reason != "" {
 		t.Errorf("Verify(engine identity) = %q, want the lock accepted", reason)
 	}

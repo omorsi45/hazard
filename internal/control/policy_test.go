@@ -22,13 +22,21 @@ func basePolicy() Policy {
 		GeneratedGlobs:    []string{"**/*.pb.go"},
 		Redact:            "structure",
 		TierEnabled:       false,
+
+		L1Mode:                "graph",
+		CoverageMaxAgeCommits: 200,
+		GoEnabled:             true,
+		GoPackages:            []string{"./a/...", "./b/..."},
+		GoTags:                []string{"integration", "e2e"},
+		PythonEnabled:         true,
+		PythonTestpaths:       []string{"tests", "it"},
 	}
 }
 
 func TestPolicyDigestIsTheHashOfTheCanonicalJSON(t *testing.T) {
 	// The field names, their order and the number formatting are part of the
 	// digest, so a rename or reorder shows up here.
-	const wantJSON = `{"feature_version":"f2","predictor":"ensemble","max_hops":3,"max_candidates":200,"coverage_required":true,"min_saving_ratio":0.2,"candidate_ranking":["hops","coverage"],"full_suite_triggers":["go.mod","go.sum"],"generated_globs":["**/*.pb.go"],"redact":"structure","tier_enabled":false}`
+	const wantJSON = `{"feature_version":"f2","predictor":"ensemble","max_hops":3,"max_candidates":200,"coverage_required":true,"min_saving_ratio":0.2,"candidate_ranking":["hops","coverage"],"full_suite_triggers":["go.mod","go.sum"],"generated_globs":["**/*.pb.go"],"redact":"structure","tier_enabled":false,"l1_mode":"graph","coverage_max_age_commits":200,"go_enabled":true,"go_packages":["./a/...","./b/..."],"go_tags":["integration","e2e"],"python_enabled":true,"python_testpaths":["tests","it"]}`
 	sum := sha256.Sum256([]byte(wantJSON))
 	want := "sha256:" + hex.EncodeToString(sum[:])
 	if got := basePolicy().Digest(); got != want {
@@ -59,6 +67,14 @@ func TestPolicyDigestChangesWithEveryField(t *testing.T) {
 		"GeneratedGlobs":    func(p *Policy) { p.GeneratedGlobs = nil },
 		"Redact":            func(p *Policy) { p.Redact = "hash" },
 		"TierEnabled":       func(p *Policy) { p.TierEnabled = !p.TierEnabled },
+
+		"L1Mode":                func(p *Policy) { p.L1Mode = "coverage" },
+		"CoverageMaxAgeCommits": func(p *Policy) { p.CoverageMaxAgeCommits++ },
+		"GoEnabled":             func(p *Policy) { p.GoEnabled = !p.GoEnabled },
+		"GoPackages":            func(p *Policy) { p.GoPackages = []string{"./a/..."} },
+		"GoTags":                func(p *Policy) { p.GoTags = []string{"integration"} },
+		"PythonEnabled":         func(p *Policy) { p.PythonEnabled = !p.PythonEnabled },
+		"PythonTestpaths":       func(p *Policy) { p.PythonTestpaths = []string{"tests"} },
 	}
 	typ := reflect.TypeOf(Policy{})
 	for i := 0; i < typ.NumField(); i++ {
@@ -87,6 +103,9 @@ func TestPolicyDigestKeepsSliceOrder(t *testing.T) {
 	for name, reorder := range map[string]func(*Policy){
 		"CandidateRanking":  func(p *Policy) { p.CandidateRanking = []string{"coverage", "hops"} },
 		"FullSuiteTriggers": func(p *Policy) { p.FullSuiteTriggers = []string{"go.sum", "go.mod"} },
+		"GoPackages":        func(p *Policy) { p.GoPackages = []string{"./b/...", "./a/..."} },
+		"GoTags":            func(p *Policy) { p.GoTags = []string{"e2e", "integration"} },
+		"PythonTestpaths":   func(p *Policy) { p.PythonTestpaths = []string{"it", "tests"} },
 	} {
 		p := basePolicy()
 		reorder(&p)
@@ -100,6 +119,8 @@ func TestPolicyDigestTreatsNilAndEmptySlicesAlike(t *testing.T) {
 	nilled, emptied := basePolicy(), basePolicy()
 	nilled.GeneratedGlobs, nilled.CandidateRanking = nil, nil
 	emptied.GeneratedGlobs, emptied.CandidateRanking = []string{}, []string{}
+	nilled.GoPackages, nilled.GoTags, nilled.PythonTestpaths = nil, nil, nil
+	emptied.GoPackages, emptied.GoTags, emptied.PythonTestpaths = []string{}, []string{}, []string{}
 	if nilled.Digest() != emptied.Digest() {
 		t.Errorf("nil slices gave %q, empty slices %q", nilled.Digest(), emptied.Digest())
 	}

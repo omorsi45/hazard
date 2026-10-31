@@ -75,11 +75,11 @@ type TestScore struct {
 }
 
 // BuildPolicy is the selection policy a lock is calibrated under: the
-// configuration that changes which tests a decision picks, and the predictor
-// kind in use. Its digest goes into the lock, so any change to one of these
-// fields makes a lock calibrated under the old policy fail with
-// policy_mismatch.
-func BuildPolicy(cfg config.Config, predictorKind string) control.Policy {
+// configuration that changes which tests a decision picks, the L1 mode the
+// deterministic layer runs in, and the predictor kind in use. Its digest goes
+// into the lock, so any change to one of these fields makes a lock calibrated
+// under the old policy fail with policy_mismatch.
+func BuildPolicy(cfg config.Config, predictorKind string, mode impact.Mode) control.Policy {
 	return control.Policy{
 		FeatureVersion:    impact.FeatureVersion,
 		Predictor:         predictorKind,
@@ -92,7 +92,23 @@ func BuildPolicy(cfg config.Config, predictorKind string) control.Policy {
 		GeneratedGlobs:    cfg.Repo.GeneratedGlobs,
 		Redact:            cfg.Privacy.Redact,
 		TierEnabled:       false,
+
+		L1Mode:                l1ModeName(mode),
+		CoverageMaxAgeCommits: cfg.Impact.CoverageMaxAgeCommits,
+		GoEnabled:             cfg.Languages.Go.Enabled,
+		GoPackages:            cfg.Languages.Go.Packages,
+		GoTags:                cfg.Languages.Go.Tags,
+		PythonEnabled:         cfg.Languages.Python.Enabled,
+		PythonTestpaths:       cfg.Languages.Python.Testpaths,
 	}
+}
+
+// l1ModeName is the name of mode as a lock records it.
+func l1ModeName(mode impact.Mode) string {
+	if mode == impact.ModeCoverage {
+		return control.L1ModeCoverage
+	}
+	return control.L1ModeGraph
 }
 
 // LoadPredictor builds the predictor of the given kind from the artifacts and

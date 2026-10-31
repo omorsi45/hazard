@@ -23,6 +23,17 @@ type Policy struct {
 	GeneratedGlobs    []string `json:"generated_globs"`
 	Redact            string   `json:"redact"`
 	TierEnabled       bool     `json:"tier_enabled"`
+
+	// L1Mode is the mode the deterministic layer ran in ("graph" or
+	// "coverage"); the rest define the inventory and the coverage window the
+	// floor was measured over.
+	L1Mode                string   `json:"l1_mode"`
+	CoverageMaxAgeCommits int      `json:"coverage_max_age_commits"`
+	GoEnabled             bool     `json:"go_enabled"`
+	GoPackages            []string `json:"go_packages"`
+	GoTags                []string `json:"go_tags"`
+	PythonEnabled         bool     `json:"python_enabled"`
+	PythonTestpaths       []string `json:"python_testpaths"`
 }
 
 // Digest returns "sha256:" followed by the hex SHA-256 of the compact JSON of
@@ -35,6 +46,9 @@ func (p Policy) Digest() string {
 	p.CandidateRanking = nonNil(p.CandidateRanking)
 	p.FullSuiteTriggers = nonNil(p.FullSuiteTriggers)
 	p.GeneratedGlobs = nonNil(p.GeneratedGlobs)
+	p.GoPackages = nonNil(p.GoPackages)
+	p.GoTags = nonNil(p.GoTags)
+	p.PythonTestpaths = nonNil(p.PythonTestpaths)
 	b, err := json.Marshal(p)
 	if err != nil {
 		return ""

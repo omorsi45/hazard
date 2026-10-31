@@ -179,8 +179,8 @@ func writeE2ELock(t *testing.T, dir string) control.Lock {
 	lock := control.Lock{
 		Version: 1, CreatedAt: "2026-10-29T00:00:00Z", Alpha: 0.01, Delta: 0.05, Unit: "commit", Lambda: 0.05,
 		Predictor: "logistic", ModelVersion: id.ModelRelease, RubricVersion: id.RubricVersion, FeatureVersion: id.FeatureVersion,
-		WeightsDigest: id.WeightsDigest, PolicyDigest: engine.BuildPolicy(cfg, "logistic").Digest(),
-		NCal: 400, EmpiricalMissRate: 0.002, Split: "temporal", SplitAt: "2026-06-01",
+		WeightsDigest: id.WeightsDigest, PolicyDigest: engine.BuildPolicy(cfg, "logistic", impact.ModeGraph).Digest(),
+		L1Mode: control.L1ModeGraph, NCal: 400, EmpiricalMissRate: 0.002, Split: "temporal", SplitAt: "2026-06-01",
 	}
 	if err := control.WriteLock(filepath.Join(dir, "hazard.lock"), lock); err != nil {
 		t.Fatal(err)

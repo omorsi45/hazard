@@ -14,7 +14,7 @@ func TestBuildPolicyIsTheConfiguredSelectionPolicy(t *testing.T) {
 	t.Parallel()
 	cfg := config.Defaults()
 
-	got := BuildPolicy(cfg, "logistic")
+	got := BuildPolicy(cfg, "logistic", impact.ModeGraph)
 
 	want := control.Policy{
 		FeatureVersion:    impact.FeatureVersion,
@@ -28,6 +28,14 @@ func TestBuildPolicyIsTheConfiguredSelectionPolicy(t *testing.T) {
 		GeneratedGlobs:    cfg.Repo.GeneratedGlobs,
 		Redact:            cfg.Privacy.Redact,
 		TierEnabled:       false,
+
+		L1Mode:                "graph",
+		CoverageMaxAgeCommits: cfg.Impact.CoverageMaxAgeCommits,
+		GoEnabled:             cfg.Languages.Go.Enabled,
+		GoPackages:            cfg.Languages.Go.Packages,
+		GoTags:                cfg.Languages.Go.Tags,
+		PythonEnabled:         cfg.Languages.Python.Enabled,
+		PythonTestpaths:       cfg.Languages.Python.Testpaths,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("policy\n got: %+v\nwant: %+v", got, want)
@@ -39,7 +47,7 @@ func TestBuildPolicyIsTheConfiguredSelectionPolicy(t *testing.T) {
 // it, and a knob that cannot change a selection must not.
 func TestBuildPolicyDigestFollowsEverythingThatChangesADecision(t *testing.T) {
 	t.Parallel()
-	base := BuildPolicy(config.Defaults(), "logistic").Digest()
+	base := BuildPolicy(config.Defaults(), "logistic", impact.ModeGraph).Digest()
 	if base == "" {
 		t.Fatal("the default policy has no digest")
 	}
@@ -54,27 +62,39 @@ func TestBuildPolicyDigestFollowsEverythingThatChangesADecision(t *testing.T) {
 		},
 		"generated globs": func(c *config.Config) { c.Repo.GeneratedGlobs = []string{"**/*.gen.go"} },
 		"redaction":       func(c *config.Config) { c.Privacy.Redact = "none" },
+
+		"coverage max age": func(c *config.Config) { c.Impact.CoverageMaxAgeCommits++ },
+		"go enabled":       func(c *config.Config) { c.Languages.Go.Enabled = !c.Languages.Go.Enabled },
+		"go packages":      func(c *config.Config) { c.Languages.Go.Packages = []string{"./cmd/..."} },
+		"go tags":          func(c *config.Config) { c.Languages.Go.Tags = []string{"integration"} },
+		"python enabled":   func(c *config.Config) { c.Languages.Python.Enabled = !c.Languages.Python.Enabled },
+		"python testpaths": func(c *config.Config) { c.Languages.Python.Testpaths = []string{"tests", "it"} },
 	}
 	for name, move := range moves {
 		cfg := config.Defaults()
 		move(&cfg)
-		if BuildPolicy(cfg, "logistic").Digest() == base {
+		if BuildPolicy(cfg, "logistic", impact.ModeGraph).Digest() == base {
 			t.Errorf("changing %s did not change the policy digest", name)
 		}
 	}
-	if BuildPolicy(config.Defaults(), "static").Digest() == base {
+	if BuildPolicy(config.Defaults(), "static", impact.ModeGraph).Digest() == base {
 		t.Error("another predictor kind did not change the policy digest")
+	}
+	if BuildPolicy(config.Defaults(), "logistic", impact.ModeCoverage).Digest() == base {
+		t.Error("another L1 mode did not change the policy digest")
 	}
 
 	same := map[string]func(*config.Config){
-		"jev budget":     func(c *config.Config) { c.Predictor.Jev.BudgetUSDPerRun *= 2 },
-		"telemetry path": func(c *config.Config) { c.Telemetry.Path = "elsewhere.jsonl" },
-		"drift window":   func(c *config.Config) { c.Control.Drift.WindowRuns++ },
+		"jev budget":      func(c *config.Config) { c.Predictor.Jev.BudgetUSDPerRun *= 2 },
+		"telemetry path":  func(c *config.Config) { c.Telemetry.Path = "elsewhere.jsonl" },
+		"drift window":    func(c *config.Config) { c.Control.Drift.WindowRuns++ },
+		"go coverprofile": func(c *config.Config) { c.Languages.Go.Coverprofile = "elsewhere.out" },
+		"pytest args":     func(c *config.Config) { c.Languages.Python.PytestArgs = []string{"-x"} },
 	}
 	for name, move := range same {
 		cfg := config.Defaults()
 		move(&cfg)
-		if BuildPolicy(cfg, "logistic").Digest() != base {
+		if BuildPolicy(cfg, "logistic", impact.ModeGraph).Digest() != base {
 			t.Errorf("changing %s moved the policy digest, which would void every lock for nothing", name)
 		}
 	}

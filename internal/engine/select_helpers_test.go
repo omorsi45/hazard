@@ -14,6 +14,7 @@ import (
 
 	"github.com/omorsi45/hazard/internal/config"
 	"github.com/omorsi45/hazard/internal/control"
+	"github.com/omorsi45/hazard/internal/impact"
 	"github.com/omorsi45/hazard/internal/predict"
 )
 
@@ -68,7 +69,8 @@ func (f *fixture) config(t *testing.T) config.Config {
 func (f *fixture) lockPath() string { return filepath.Join(f.dir, "hazard.lock") }
 
 // writeLock writes the lock the engine would verify for kind: the identity of
-// the predictor LoadPredictor builds and the digest of BuildPolicy. mutate
+// the predictor LoadPredictor builds and the digest of BuildPolicy, in the
+// graph mode hazard calibrate records. mutate
 // changes the lock before it is written, so a test can make exactly one field
 // disagree with the running system.
 func (f *fixture) writeLock(t *testing.T, kind string, mutate func(*control.Lock)) control.Lock {
@@ -81,8 +83,8 @@ func (f *fixture) writeLock(t *testing.T, kind string, mutate func(*control.Lock
 	l := control.Lock{
 		Version: 1, CreatedAt: "2026-10-29T00:00:00Z", Alpha: 0.01, Delta: 0.05, Unit: "commit", Lambda: lockLambda,
 		Predictor: kind, ModelVersion: id.ModelRelease, RubricVersion: id.RubricVersion,
-		FeatureVersion: id.FeatureVersion, WeightsDigest: id.WeightsDigest, PolicyDigest: BuildPolicy(cfg, kind).Digest(),
-		NCal: 400, EmpiricalMissRate: 0.002, Split: "temporal", SplitAt: "2026-06-01",
+		FeatureVersion: id.FeatureVersion, WeightsDigest: id.WeightsDigest, PolicyDigest: BuildPolicy(cfg, kind, impact.ModeGraph).Digest(),
+		L1Mode: control.L1ModeGraph, NCal: 400, EmpiricalMissRate: 0.002, Split: "temporal", SplitAt: "2026-06-01",
 	}
 	if mutate != nil {
 		mutate(&l)

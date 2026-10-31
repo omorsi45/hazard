@@ -69,9 +69,11 @@ A lock is valid only for the system that produced it. The digest covers every fi
 | model release (`model_version`) | `model_drift` |
 | rubric version | `rubric_mismatch` |
 | feature version or weights digest | `feature_mismatch` |
-| selection policy digest (candidate cap, hops, triggers, redaction level, minimum saving, predictor kind) | `policy_mismatch` |
+| selection policy digest (candidate cap, hops, triggers, redaction level, minimum saving, predictor kind, L1 mode, coverage window, and the language settings that define the inventory: Go enabled, packages and tags, Python enabled and testpaths) | `policy_mismatch` |
 
-The policy is part of the calibration input, so changing the candidate cap or the redaction level voids a lock calibrated without it.
+The policy is part of the calibration input, so changing the candidate cap, the redaction level, the packages, the tags or the testpaths voids a lock calibrated without it.
+
+The lock also records the L1 mode it was calibrated in (`l1_mode`, `graph` or `coverage`; `hazard calibrate` writes `graph`, because its replay index has no coverage). A selection under a lock runs L1 in that mode, so an index that also holds coverage never narrows a graph lock further than the floor its threshold was measured over. A lock that names `coverage` over an index without coverage ends in `policy_mismatch` and the full suite.
 
 ## Why nothing is certified today
 

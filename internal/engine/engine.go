@@ -271,12 +271,11 @@ func pipeline(ctx context.Context, opts Options, start time.Time) (d Decision, e
 		return d, nil
 	}
 
-	mode := impact.ModeGraph
-	switch {
-	case opts.ModeSet:
-		mode = opts.Mode
-	case m.Coverage != nil:
-		mode = impact.ModeCoverage
+	ls := loadLock(opts)
+	mode, modeReason, modeDetail := l1Mode(opts, m.Coverage != nil, ls)
+	if modeReason != "" {
+		d.full(modeReason, modeDetail)
+		return d, nil
 	}
 	res, err := impact.L1(impact.Input{
 		Change:        cs,
@@ -303,7 +302,7 @@ func pipeline(ctx context.Context, opts Options, start time.Time) (d Decision, e
 	}
 	d.Hypothetical = hypothetical(res, mi, always)
 
-	st := stage{opts: opts, cfg: effectiveConfig(cfg, opts), start: start, cs: cs, m: mi, res: res, always: always}
+	st := stage{opts: opts, cfg: effectiveConfig(cfg, opts), start: start, cs: cs, m: mi, res: res, always: always, mode: mode, lock: ls}
 	if err := st.run(ctx, &d); err != nil {
 		return d, err
 	}

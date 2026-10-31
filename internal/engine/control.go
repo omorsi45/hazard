@@ -23,6 +23,7 @@ const (
 	reasonPredictorUnavailable = "predictor_unavailable"
 	reasonPredictorError       = "predictor_error"
 	reasonModelDrift           = "model_drift"
+	reasonPolicyMismatch       = "policy_mismatch"
 	reasonDryRun               = "dry_run"
 
 	// supportedLockVersion is the only lock schema version control.WriteLock
@@ -48,6 +49,8 @@ type stage struct {
 	m      *index.Manifest // the inventory L1 ran over, head tests included
 	res    *impact.Result
 	always map[string]string
+	mode   impact.Mode // the mode L1 ran in: the policy digest is built with it
+	lock   lockState   // the lock read before L1, which chose the mode
 }
 
 // effectiveConfig applies the overrides of a request to the configuration that
@@ -77,9 +80,9 @@ func (s stage) run(ctx context.Context, d *Decision) error {
 		s.dryRun(d)
 		return nil
 	}
-	lock, reason, detail := readLock(controllerLockPath(s.opts))
-	if reason != "" {
-		d.full(reason, nonEmpty(detail)...)
+	lock := s.lock.lock
+	if reason := s.lock.reason; reason != "" {
+		d.full(reason, nonEmpty(s.lock.detail)...)
 		return nil
 	}
 	if !isKnownKind(lock.Predictor) {
@@ -100,7 +103,7 @@ func (s stage) run(ctx context.Context, d *Decision) error {
 		d.full(reasonPredictorUnavailable, err.Error())
 		return nil
 	}
-	id.PolicyDigest = BuildPolicy(s.cfg, kind).Digest()
+	id.PolicyDigest = BuildPolicy(s.cfg, kind, s.mode).Digest()
 	if reason := lock.Verify(id); reason != "" {
 		d.full(reason, mismatchDetail(lock, id, reason))
 		return nil
@@ -212,8 +215,48 @@ func readLock(path string) (l control.Lock, reason, detail string) {
 		// would select no candidate at all, and the digest only detects damage:
 		// it cannot vouch for a file somebody edited and re-sealed.
 		return l, reasonLockCorrupt, fmt.Sprintf("lock %s has the threshold lambda %v, want a value in (0, 1)", path, l.Lambda)
+	case l.L1Mode != control.L1ModeGraph && l.L1Mode != control.L1ModeCoverage:
+		return l, reasonLockCorrupt, fmt.Sprintf("lock %s names the L1 mode %q, want %q or %q", path, l.L1Mode, control.L1ModeGraph, control.L1ModeCoverage)
 	}
 	return l, "", ""
+}
+
+// lockState is what reading the lock gave: the lock, or the reason none can
+// be used. It is read once, before L1, because the lock decides the L1 mode.
+type lockState struct {
+	lock   control.Lock
+	reason string // as readLock: no_lock, lock_error or lock_corrupt; empty when lock is usable
+	detail string
+}
+
+// loadLock reads the lock the controller will verify for opts.
+func loadLock(opts Options) lockState {
+	l, reason, detail := readLock(controllerLockPath(opts))
+	return lockState{lock: l, reason: reason, detail: detail}
+}
+
+// l1Mode is the mode L1 runs in. An explicit Options.Mode wins (the evaluation
+// harness, which never uses a lock). Otherwise a lock that parses decides:
+// its threshold was certified over the floor of the mode it was calibrated
+// in, and only that floor may be narrowed from. A lock calibrated with
+// coverage cannot be honored by an index without it, which is a
+// policy_mismatch. With no usable lock the mode follows the index: coverage
+// when the index has it, else graph.
+func l1Mode(opts Options, hasCoverage bool, ls lockState) (mode impact.Mode, reason, detail string) {
+	switch {
+	case opts.ModeSet:
+		return opts.Mode, "", ""
+	case ls.reason == "" && ls.lock.L1Mode == control.L1ModeGraph:
+		return impact.ModeGraph, "", ""
+	case ls.reason == "" && ls.lock.L1Mode == control.L1ModeCoverage:
+		if !hasCoverage {
+			return impact.ModeGraph, reasonPolicyMismatch, "the lock was calibrated in coverage mode but the index has no coverage"
+		}
+		return impact.ModeCoverage, "", ""
+	case hasCoverage:
+		return impact.ModeCoverage, "", ""
+	}
+	return impact.ModeGraph, "", ""
 }
 
 func isKnownKind(kind string) bool {
@@ -317,8 +360,8 @@ func (s stage) dryRun(d *Decision) {
 	d.full(reasonDryRun)
 	kind := s.opts.Predictor
 	if kind == "" {
-		if lock, reason, _ := readLock(controllerLockPath(s.opts)); reason == "" {
-			kind = lock.Predictor
+		if s.lock.reason == "" {
+			kind = s.lock.lock.Predictor
 		}
 	}
 	if kind != kindJev && kind != kindEnsemble {

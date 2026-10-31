@@ -38,7 +38,7 @@ func calibrationParams(t *testing.T) CalibrationParams {
 		t.Fatal(err)
 	}
 	return CalibrationParams{
-		Alpha: 0.01, Delta: 0.05, Grid: grid, Unit: "commit", Split: "temporal", SplitAt: "2026-06-01",
+		Alpha: 0.01, Delta: 0.05, Grid: grid, Unit: "commit", Split: "temporal", SplitAt: "2026-06-01", L1Mode: L1ModeGraph,
 		Identity: testIdentity(), Now: time.Date(2026, 10, 14, 18, 22, 4, 0, time.UTC),
 	}
 }
@@ -179,6 +179,7 @@ func TestCalibrateLockCarriesEveryInputAndPassesVerify(t *testing.T) {
 		{"FeatureVersion", l.FeatureVersion, p.Identity.FeatureVersion},
 		{"WeightsDigest", l.WeightsDigest, p.Identity.WeightsDigest},
 		{"PolicyDigest", l.PolicyDigest, p.Identity.PolicyDigest},
+		{"L1Mode", l.L1Mode, L1ModeGraph},
 		{"NCal", l.NCal, 300}, {"Split", l.Split, "temporal"}, {"SplitAt", l.SplitAt, "2026-06-01"},
 		{"Grid", l.Grid, p.Grid}, {"CalibrationIDs", l.CalibrationIDs, wantIDs},
 	}

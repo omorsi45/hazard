@@ -242,7 +242,7 @@ func runCalibrate(cmd *cobra.Command, _ []string) (err error) {
 		}
 		return err
 	}
-	id.PolicyDigest = engine.BuildPolicy(cfg, req.predictor).Digest()
+	id.PolicyDigest = engine.BuildPolicy(cfg, req.predictor, impact.ModeGraph).Digest()
 	testMS, err := historyDurations(ctx)
 	if err != nil {
 		return err
@@ -289,6 +289,7 @@ func runCalibrate(cmd *cobra.Command, _ []string) (err error) {
 
 	result := control.Calibrate(units, control.CalibrationParams{
 		Alpha: req.alpha, Delta: req.delta, Grid: req.grid, Unit: req.unit, Split: req.method, SplitAt: splitAtText(req),
+		L1Mode:   control.L1ModeGraph, // the replay index has no coverage and forces ModeGraph
 		Identity: id, Now: calibrateNow(),
 	})
 	if result.LTT.Refused {

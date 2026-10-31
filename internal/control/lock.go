@@ -25,9 +25,17 @@ const (
 	reasonPolicyMismatch  = "policy_mismatch"
 )
 
+// The L1 modes a lock may name: the mode the deterministic layer ran in when
+// the threshold was calibrated, and the only mode a selection under that lock
+// may use.
+const (
+	L1ModeGraph    = "graph"
+	L1ModeCoverage = "coverage"
+)
+
 // Lock is the calibration lock (seed 7.1) plus the digests that bind it to the
-// feature weights and selection policy, and the calibration commits behind it.
-// Digest covers every other field.
+// feature weights and selection policy, the L1 mode it was calibrated in, and
+// the calibration commits behind it. Digest covers every other field.
 type Lock struct {
 	Version           int                `json:"version"`
 	CreatedAt         string             `json:"created_at"`
@@ -41,6 +49,7 @@ type Lock struct {
 	FeatureVersion    string             `json:"feature_version"`
 	WeightsDigest     string             `json:"weights_digest"`
 	PolicyDigest      string             `json:"policy_digest"`
+	L1Mode            string             `json:"l1_mode"`
 	NCal              int                `json:"n_cal"`
 	EmpiricalMissRate float64            `json:"empirical_miss_rate"`
 	Split             string             `json:"split"`
@@ -103,6 +112,8 @@ func (l Lock) validate() error {
 		return errors.New("empty rubric_version")
 	case l.FeatureVersion == "":
 		return errors.New("empty feature_version")
+	case l.L1Mode != L1ModeGraph && l.L1Mode != L1ModeCoverage:
+		return fmt.Errorf("l1_mode %q, want %q or %q", l.L1Mode, L1ModeGraph, L1ModeCoverage)
 	case l.NCal <= 0:
 		return fmt.Errorf("n_cal %d, want > 0", l.NCal)
 	case !(l.EmpiricalMissRate >= 0 && l.EmpiricalMissRate <= 1):

@@ -24,6 +24,7 @@ type CalibrationParams struct {
 	Grid           []float64
 	Unit           string
 	Split, SplitAt string
+	L1Mode         string // the mode the units were replayed in: L1ModeGraph or L1ModeCoverage
 	Identity       Identity
 	Now            time.Time
 }
@@ -106,6 +107,7 @@ func Calibrate(units []CalUnit, p CalibrationParams) Calibration {
 		FeatureVersion:    p.Identity.FeatureVersion,
 		WeightsDigest:     p.Identity.WeightsDigest,
 		PolicyDigest:      p.Identity.PolicyDigest,
+		L1Mode:            p.L1Mode,
 		NCal:              n,
 		EmpiricalMissRate: res.EmpiricalMiss,
 		Split:             p.Split,
