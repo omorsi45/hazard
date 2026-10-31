@@ -100,3 +100,28 @@ func TestUnstableIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestPythonIdentityFromNodeID(t *testing.T) {
+	for _, tc := range []struct{ node, id, pkg, name, file string }{
+		{"tests/test_x.py::test_a", "py:tests.test_x:test_a", "tests.test_x", "test_a", "tests/test_x.py"},
+		{"tests/test_x.py::TestC::test_b", "py:tests.test_x.TestC:test_b", "tests.test_x.TestC", "test_b", "tests/test_x.py"},
+		{"test_top.py::A::B::test_c[1-2]", "py:test_top.A.B:test_c[1-2]", "test_top.A.B", "test_c[1-2]", "test_top.py"},
+		{"pkg/sub/test_y.py::test_p[a::b, c]", "py:pkg.sub.test_y:test_p[a::b, c]", "pkg.sub.test_y", "test_p[a::b, c]", "pkg/sub/test_y.py"},
+	} {
+		got, err := PythonIdentityFromNodeID(tc.node)
+		if err != nil || got.ID != tc.id || got.Language != "python" || got.Package != tc.pkg || got.Name != tc.name || got.File != tc.file || got.RunnerID != tc.node || got.Unstable {
+			t.Errorf("%s: got %+v err=%v", tc.node, got, err)
+		}
+	}
+	got, err := PythonIdentityFromNodeID("tests/test_x.py::test_a[<Widget object at 0xABC>]")
+	if err != nil || !got.Unstable || got.IdentityReason == "" || got.RunnerID == "" {
+		t.Errorf("unstable node ID not marked: %+v %v", got, err)
+	}
+	for _, bad := range []string{"", "tests/test_x.py", "tests/test_x.py::", "::test_a", "tests/test_x.txt::test_a", "../x.py::test_a", "/abs/x.py::test_a", "tests//x.py::test_a", "tests/x.py::A::::t", "tests/x.py::test a\n"} {
+		got, err := PythonIdentityFromNodeID(bad)
+		var identityErr *IdentityError
+		if !errors.As(err, &identityErr) || got.ID != "" {
+			t.Errorf("%q: invented identity %+v err=%v", bad, got, err)
+		}
+	}
+}

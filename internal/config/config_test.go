@@ -104,6 +104,7 @@ func TestValidation(t *testing.T) {
 		"bad timeout":      func(c *Config) { c.Predictor.Jev.RetryBackoffMS = c.Predictor.Jev.TimeoutMS },
 		"bad endpoint":     func(c *Config) { c.Predictor.Jev.Endpoint = "http://example.com" },
 		"bad model":        func(c *Config) { c.Predictor.Jev.Model = "" },
+		"no calibration":   func(c *Config) { c.Predictor.Static.Calibration = "" },
 		"bad schedule":     func(c *Config) { c.Audit.FullSuiteSchedule = "" },
 		"bad drift window": func(c *Config) { c.Control.Drift.WindowRuns = 0 },
 	}
@@ -119,6 +120,42 @@ func TestValidation(t *testing.T) {
 	c := Defaults()
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStaticCalibrationDefaultAndOverride(t *testing.T) {
+	if got := Defaults().Predictor.Static.Calibration; got != ".hazard/static.json" {
+		t.Fatalf("default calibration = %q, want .hazard/static.json", got)
+	}
+	write := func(body string) string {
+		p := filepath.Join(t.TempDir(), "hazard.yml")
+		if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	c, err := Load(write("predictor:\n  static:\n    calibration: out/static.json\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Predictor.Static.Calibration; got != "out/static.json" {
+		t.Fatalf("overridden calibration = %q, want out/static.json", got)
+	}
+	if got, want := c.Predictor.Logistic.Weights, Defaults().Predictor.Logistic.Weights; got != want {
+		t.Fatalf("overriding static changed logistic.weights to %q, want %q", got, want)
+	}
+	c, err = Load(write("predictor:\n  kind: static\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Predictor.Static.Calibration; got != ".hazard/static.json" {
+		t.Fatalf("calibration with no static section = %q, want the default", got)
+	}
+	if _, err := Load(write("predictor:\n  static:\n    unknown: 1\n")); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("unknown field under predictor.static accepted: %v", err)
+	}
+	if _, err := Load(write("predictor:\n  static:\n    calibration: \"\"\n")); err == nil || !strings.Contains(err.Error(), "predictor identity") {
+		t.Fatalf("empty calibration path accepted: %v", err)
 	}
 }
 

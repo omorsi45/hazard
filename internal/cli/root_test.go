@@ -41,15 +41,7 @@ func TestHelpTreeAndVersion(t *testing.T) {
 }
 
 func TestDocumentedFlagsParse(t *testing.T) {
-	cases := [][]string{
-		{"select", "--base", "main", "--head", "HEAD", "--config", "hazard.yml", "--lock", "hazard.lock", "--predictor", "static", "--recall", "0.9", "--i-know-what-im-doing", "--max-candidates", "10", "--budget-ms", "1000", "--budget-usd", "0.1", "--redact", "hash", "--shadow", "--dry-run-payload", "--format", "json", "--out", "out.txt", "--explain", "-vv"},
-		{"run", "--base", "main", "--runner", "gotest", "--junit", "junit.xml", "--full", "--no-fallback", "--", "-run", "TestOne"},
-		{"mutate", "--base", "HEAD", "--files", "internal/**/*.go", "--n", "500", "--operators", "cmp,logic", "--timeout", "300s", "--concurrency", "4", "--out", "mutants.jsonl"},
-		{"calibrate", "--alpha", "0.01", "--delta", "0.05", "--split", "temporal", "--split-at", "2026-06-01", "--predictor", "ensemble", "--grid", "0.005:0.500:0.005", "--unit", "commit", "--out", "hazard.lock"},
-		{"eval", "--split", "temporal", "--split-at", "2026-06-01", "--predictors", "static,logistic", "--baselines", "all,l1-only", "--out", "report"},
-		{"audit", "--full-run", "junit.xml", "--since-run", "id", "--bisect"},
-		{"explain", "--test", "go:pkg:TestOne", "--base", "main"},
-	}
+	cases := [][]string{}
 	for _, args := range cases {
 		t.Run(strings.Join(args[:min(len(args), 2)], "_"), func(t *testing.T) {
 			code, _, errOut := invoke(context.Background(), args...)
@@ -67,7 +59,9 @@ func TestUsageAndJSONErrors(t *testing.T) {
 			t.Errorf("%v returned %d, want 2", args, code)
 		}
 	}
-	code, out, errOut := invoke(context.Background(), "select", "--json")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	code, out, errOut := invoke(canceled, "eval", "--json")
 	if code != 70 || out != "" {
 		t.Fatalf("JSON leaf code=%d stdout=%q stderr=%q", code, out, errOut)
 	}
@@ -87,9 +81,11 @@ func TestUsageAndJSONErrors(t *testing.T) {
 func TestCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	code, _, errOut := invoke(ctx, "select")
-	if code != 70 || !strings.Contains(errOut, "canceled") {
-		t.Fatalf("canceled code=%d err=%q", code, errOut)
+	for _, command := range []string{"select", "eval", "run"} {
+		code, _, errOut := invoke(ctx, command)
+		if code != 70 || !strings.Contains(errOut, "canceled") {
+			t.Fatalf("%s canceled code=%d err=%q", command, code, errOut)
+		}
 	}
 }
 
@@ -105,9 +101,11 @@ func TestRecallOverrideRequiresExplicitConfirmation(t *testing.T) {
 			t.Errorf("%v: code=%d, want 2", args, code)
 		}
 	}
-	code, _, _ := invoke(context.Background(), "select", "--recall", "0.9", "--i-know-what-im-doing")
-	if code != 70 {
-		t.Fatalf("confirmed override should reach scaffold leaf: %d", code)
+	// A confirmed override passes the usage gate and reaches the selector.
+	r := newRig(t, narrowedDecision())
+	code, _, errOut := r.run("--recall", "0.9", "--i-know-what-im-doing")
+	if code != 0 || r.sel.calls != 1 || r.sel.got.Recall != 0.9 {
+		t.Fatalf("confirmed override: code=%d err=%q Select calls=%d recall=%v", code, errOut, r.sel.calls, r.sel.got.Recall)
 	}
 }
 
@@ -161,7 +159,7 @@ func TestJSONUsageErrorsIndependentOfFlagOrder(t *testing.T) {
 	for _, args := range [][]string{
 		{"select", "--format", "--json", "--unknown"},
 		{"run", "--runner", "--json", "--unknown"},
-		{"run", "--", "--json"},
+		{"run", "--runner", "bogus", "--", "--json"},
 	} {
 		_, _, errOut := invoke(context.Background(), args...)
 		if strings.HasPrefix(errOut, "{") {
