@@ -101,7 +101,7 @@ Coverage granularity is a top-level Go test, with its subtests treated as one gr
 
 ## The lock
 
-`hazard.lock` is JSON with a digest over every other field. It holds the schema version, creation time, alpha, delta, unit, the threshold, the predictor kind, the model release, the rubric version, the feature version, the weights digest, the policy digest, the L1 mode (`graph` or `coverage`) the threshold was calibrated in, the calibration sample size and empirical miss rate, the split, the grid with the p-value of every evaluated threshold, and the sorted IDs of the calibration commits. The engine verifies it on every decision, and a selection under a lock runs L1 in the lock's mode. A mismatch is a full-suite decision, never a silent fallback. See [GUARANTEE.md](GUARANTEE.md).
+`hazard.lock` is JSON with a digest over every other field. It holds the schema version, creation time, alpha, delta, unit, the threshold, the predictor kind, the model release, the rubric version, the feature version, the weights digest, the policy digest, the L1 mode (`graph` or `coverage`) the threshold was calibrated in, the calibration sample size, how many of those units were counted as misses because their replay failed, and the empirical miss rate, the split, the grid with the p-value of every evaluated threshold, and the sorted IDs of the calibration commits. The engine verifies it on every decision, and a selection under a lock runs L1 in the lock's mode. A mismatch is a full-suite decision, never a silent fallback. See [GUARANTEE.md](GUARANTEE.md).
 
 ## Telemetry and audit
 
