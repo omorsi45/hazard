@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -57,8 +58,12 @@ type Corpus struct {
 // A mutation event needs the index of the repository, which must describe the
 // mutation base (RefusalError otherwise). A CI event is replayed on an index
 // built, without coverage, at its parent in a scratch checkout.
-func Collect(ctx context.Context, opts CollectOptions) (*Corpus, error) {
-	c := &collector{opts: opts, observed: map[[3]string]int{}, skipped: map[string]int{}}
+func Collect(ctx context.Context, opts CollectOptions) (corpus *Corpus, err error) {
+	c, cleanup, err := newCollector(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, cleanup()) }()
 	recs, labels, err := c.readDatabase(ctx)
 	if err != nil {
 		return nil, err
@@ -79,6 +84,21 @@ type collector struct {
 	rows     []predict.TrainEvent
 	certain  int
 	unlisted int
+	lockPath string // a path that never exists: no replay may read a lock
+}
+
+// newCollector returns a collector whose replays can never read a lock. A
+// replay clone is a checkout of the base commit, so a hazard.lock committed
+// there would otherwise decide the replay: its predictor would be loaded and,
+// for a remote one, asked about the change. The returned function removes the
+// directory the absent lock path lives in.
+func newCollector(opts CollectOptions) (*collector, func() error, error) {
+	dir, err := os.MkdirTemp("", "hazard-collect-lock-*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("events: %w", err)
+	}
+	c := &collector{opts: opts, observed: map[[3]string]int{}, skipped: map[string]int{}, lockPath: filepath.Join(dir, "absent.lock")}
+	return c, func() error { return os.RemoveAll(dir) }, nil
 }
 
 func (c *collector) logf(format string, args ...any) {
@@ -209,7 +229,7 @@ func modeFor(m *index.Manifest) impact.Mode {
 }
 
 func (c *collector) engineOptions(m *index.Manifest) engine.Options {
-	return engine.Options{ConfigPath: c.opts.ConfigPath, ModeSet: true, Mode: modeFor(m)}
+	return engine.Options{ConfigPath: c.opts.ConfigPath, LockPath: c.lockPath, ModeSet: true, Mode: modeFor(m)}
 }
 
 // addRows records the outcome of one replayed event.

@@ -3,12 +3,16 @@ package events
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/omorsi45/hazard/internal/config"
+	"github.com/omorsi45/hazard/internal/control"
+	"github.com/omorsi45/hazard/internal/engine"
 	"github.com/omorsi45/hazard/internal/impact"
 	"github.com/omorsi45/hazard/internal/index"
 	"github.com/omorsi45/hazard/internal/mutate"
@@ -136,5 +140,74 @@ func TestCommitInfoReadsTimeAndFirstParent(t *testing.T) {
 	}
 	if _, _, err := commitInfo(context.Background(), dir, strings.Repeat("0", 40)); err == nil {
 		t.Error("commitInfo accepted a commit that is not in the repository")
+	}
+}
+
+// TestReplaysNeverReadACommittedLock: the replay clone is a checkout of the base
+// commit, so a hazard.lock tracked there is the lock the engine would read. A
+// training replay must not be decided by it: the lock would load its predictor
+// (a remote one would be asked about the change) for every replayed event.
+func TestReplaysNeverReadACommittedLock(t *testing.T) {
+	ctx := context.Background()
+	lockFile := filepath.Join(t.TempDir(), "hazard.lock")
+	if err := control.WriteLock(lockFile, control.Lock{
+		Version: 1, CreatedAt: "2026-10-29T00:00:00Z", Alpha: 0.01, Delta: 0.05, Unit: "commit", Lambda: 0.05,
+		Predictor: "logistic", ModelVersion: "p1", RubricVersion: "none", FeatureVersion: "f", L1Mode: control.L1ModeGraph,
+		NCal: 400, EmpiricalMissRate: 0.002, Split: "temporal", SplitAt: "2026-06-01",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.ReadFile(lockFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := replayFiles()
+	files["hazard.lock"] = string(lock)
+	dir, base := newRepo(t, files)
+	r := openReplay(t, dir, base)
+	head, err := r.Commit(ctx, "sub/b.go", []byte(mutantB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(filepath.Join(r.Dir(), "hazard.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := index.Build(ctx, r.Dir(), cfg, index.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Publish(r.Dir(), m); err != nil {
+		t.Fatal(err)
+	}
+
+	// The premise: left to itself the engine reads the committed lock and
+	// tries to build its predictor, whose artifact is not in the clone.
+	d, err := r.Select(ctx, head, engine.Options{ModeSet: true, Mode: modeFor(m)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.AbstainReason != "predictor_unavailable" {
+		t.Fatalf("without a lock path the decision is %q (%v), want predictor_unavailable: the committed lock must be the one read", d.AbstainReason, d.Warnings)
+	}
+
+	c, cleanup, err := newCollector(CollectOptions{Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := cleanup(); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	})
+	d, err = r.Select(ctx, head, c.engineOptions(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.AbstainReason != "no_lock" {
+		t.Errorf("the replay decision is %q (%v), want no_lock: a committed lock must never decide a training replay", d.AbstainReason, d.Warnings)
+	}
+	if d.L1 == nil || d.Change == nil {
+		t.Errorf("L1 %v Change %v, want the deterministic layer the rows are made from", d.L1, d.Change)
 	}
 }
