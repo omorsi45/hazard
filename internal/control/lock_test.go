@@ -29,6 +29,7 @@ func testLock() Lock {
 		PolicyDigest:      "sha256:p",
 		L1Mode:            "graph",
 		NCal:              1184,
+		ReplayFailures:    2,
 		EmpiricalMissRate: 0.0034,
 		Split:             "temporal",
 		SplitAt:           "2026-06-01",
@@ -70,8 +71,8 @@ func TestComputeDigestGolden(t *testing.T) {
 	// The expected string and hash were produced independently with Python's
 	// hashlib, so a renamed field, a reordered field or a changed number
 	// format fails here.
-	const wantJSON = `{"version":1,"created_at":"2026-10-14T18:22:04Z","alpha":0.01,"delta":0.05,"unit":"commit","lambda":0.035,"predictor":"ensemble","model_version":"typesafe/jev-1.13","rubric_version":"r3","feature_version":"f2","weights_digest":"sha256:w","policy_digest":"sha256:p","l1_mode":"graph","n_cal":1184,"empirical_miss_rate":0.0034,"split":"temporal","split_at":"2026-06-01","grid":[0.005,0.01,0.035],"p_values":{"0.005":0.00012,"0.01":0.0021,"0.035":0.043},"calibration_ids":["a","b"],"digest":""}`
-	const wantDigest = "sha256:63958a9c6cbb6a121161663f54a03efbbb27a1aa925c97e8189016895482b479"
+	const wantJSON = `{"version":1,"created_at":"2026-10-14T18:22:04Z","alpha":0.01,"delta":0.05,"unit":"commit","lambda":0.035,"predictor":"ensemble","model_version":"typesafe/jev-1.13","rubric_version":"r3","feature_version":"f2","weights_digest":"sha256:w","policy_digest":"sha256:p","l1_mode":"graph","n_cal":1184,"replay_failures":2,"empirical_miss_rate":0.0034,"split":"temporal","split_at":"2026-06-01","grid":[0.005,0.01,0.035],"p_values":{"0.005":0.00012,"0.01":0.0021,"0.035":0.043},"calibration_ids":["a","b"],"digest":""}`
+	const wantDigest = "sha256:7eeedf927b1bb13cb870ef6d6e5a2b154c9b203c8b3d7964ae9745f6ff388d77"
 
 	l := testLock()
 	got, err := json.Marshal(l)
@@ -113,6 +114,7 @@ func TestComputeDigestIgnoresDigestFieldAndCoversEveryOtherField(t *testing.T) {
 		"PolicyDigest":      func(l *Lock) { l.PolicyDigest = "sha256:y" },
 		"L1Mode":            func(l *Lock) { l.L1Mode = "coverage" },
 		"NCal":              func(l *Lock) { l.NCal = 1185 },
+		"ReplayFailures":    func(l *Lock) { l.ReplayFailures = 3 },
 		"EmpiricalMissRate": func(l *Lock) { l.EmpiricalMissRate = 0.0035 },
 		"Split":             func(l *Lock) { l.Split = "random" },
 		"SplitAt":           func(l *Lock) { l.SplitAt = "2026-07-01" },
@@ -275,6 +277,8 @@ func TestWriteLockRefusesInvalidLocks(t *testing.T) {
 		"empty l1 mode":         func(l *Lock) { l.L1Mode = "" },
 		"unknown l1 mode":       func(l *Lock) { l.L1Mode = "hybrid" },
 		"zero n_cal":            func(l *Lock) { l.NCal = 0 },
+		"negative failures":     func(l *Lock) { l.ReplayFailures = -1 },
+		"failures above n_cal":  func(l *Lock) { l.ReplayFailures = l.NCal + 1 },
 		"negative miss rate":    func(l *Lock) { l.EmpiricalMissRate = -0.1 },
 		"miss rate above one":   func(l *Lock) { l.EmpiricalMissRate = 1.1 },
 		"miss rate NaN":         func(l *Lock) { l.EmpiricalMissRate = nan },

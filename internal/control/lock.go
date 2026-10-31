@@ -51,6 +51,7 @@ type Lock struct {
 	PolicyDigest      string             `json:"policy_digest"`
 	L1Mode            string             `json:"l1_mode"`
 	NCal              int                `json:"n_cal"`
+	ReplayFailures    int                `json:"replay_failures"` // units among NCal whose replay failed and that count as misses
 	EmpiricalMissRate float64            `json:"empirical_miss_rate"`
 	Split             string             `json:"split"`
 	SplitAt           string             `json:"split_at"`
@@ -116,6 +117,8 @@ func (l Lock) validate() error {
 		return fmt.Errorf("l1_mode %q, want %q or %q", l.L1Mode, L1ModeGraph, L1ModeCoverage)
 	case l.NCal <= 0:
 		return fmt.Errorf("n_cal %d, want > 0", l.NCal)
+	case l.ReplayFailures < 0 || l.ReplayFailures > l.NCal:
+		return fmt.Errorf("replay_failures %d outside [0, n_cal %d]", l.ReplayFailures, l.NCal)
 	case !(l.EmpiricalMissRate >= 0 && l.EmpiricalMissRate <= 1):
 		return fmt.Errorf("empirical_miss_rate %v outside [0, 1]", l.EmpiricalMissRate)
 	}

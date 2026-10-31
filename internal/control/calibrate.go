@@ -13,6 +13,7 @@ type CalUnit struct {
 	ID      string   // the event ID of the commit, "ci:<sha>"
 	Failing []string // F(c): the test IDs of its strong regression labels
 	Input   Input    // everything Decide needs; Lambda is set for each evaluation
+	Failed  bool     // the commit could not be replayed: its outcome is unknown, which is never a success
 }
 
 // CalibrationParams are the inputs of Calibrate besides the units. Identity
@@ -43,8 +44,13 @@ type Calibration struct {
 // input, so every abstention rule of production applies: an abstention runs
 // the full suite, which cannot miss, and has loss 0. A regression that is
 // neither certain nor a scored candidate is not selected and is a miss: an
-// unknown is never counted as caught.
+// unknown is never counted as caught. A unit whose replay failed is such an
+// unknown: what production would have selected cannot be told, so its loss is
+// 1 at every lambda.
 func UnitLoss(u CalUnit, lambda float64) float64 {
+	if u.Failed {
+		return 1
+	}
 	in := u.Input
 	in.Lambda = lambda
 	d := Decide(in)
@@ -86,8 +92,12 @@ func Calibrate(units []CalUnit, p CalibrationParams) Calibration {
 	}
 
 	ids := make([]string, n)
+	failures := 0
 	for i, u := range units {
 		ids[i] = u.ID
+		if u.Failed {
+			failures++
+		}
 	}
 	slices.Sort(ids)
 	pvalues := make(map[string]float64, len(res.Points))
@@ -109,6 +119,7 @@ func Calibrate(units []CalUnit, p CalibrationParams) Calibration {
 		PolicyDigest:      p.Identity.PolicyDigest,
 		L1Mode:            p.L1Mode,
 		NCal:              n,
+		ReplayFailures:    failures,
 		EmpiricalMissRate: res.EmpiricalMiss,
 		Split:             p.Split,
 		SplitAt:           p.SplitAt,

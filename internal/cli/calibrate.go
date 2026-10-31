@@ -41,8 +41,6 @@ const (
 	reasonBeforeTrainingCutoff = "before_training_cutoff"
 	reasonAtOrAfterSplitAt     = "at_or_after_split_at"
 	reasonRandomHoldout        = "random_holdout"
-	reasonReplayFailed         = "replay_failed"
-	reasonIndexFailed          = "index_failed"
 )
 
 // dateLayout is the layout of --split-at and of the cutoff in training.json.
@@ -76,8 +74,10 @@ is refused the same way before any unit is counted. With enough units, each is
 replayed (parent to commit in a scratch clone, with an index built at the
 parent), scored by the frozen predictor and judged by the controller of hazard
 select, abstentions included. No field observations exist at that point, so
-the drift monitor is not applied. A unit whose replay fails is dropped and
-counted, never assumed to be caught.
+the drift monitor is not applied. A unit whose replay fails (the parent cannot
+be checked out, or no index can be built at it) stays in the sample as a miss at
+every lambda, because an unknown outcome is never a success; the lock records
+how many (replay_failures) and calibrate prints the count.
 
 The bound assumes calibration and future commits are exchangeable. Commit
 history is not, so a temporal backtest is the number to believe.
@@ -516,11 +516,13 @@ func (r *calibrationReplay) logf(format string, args ...any) {
 
 // unit replays parent..commit of u in a scratch clone with an index built at
 // the parent, asks the frozen predictor about the residual candidates and
-// gathers the input of the controller exactly as a selection would. skip is
-// non-empty when the unit cannot be judged: the engine stopped before L1
-// (nothing is known about the commit), the clone or the index failed. Such a
-// unit is dropped and counted; it is never taken as caught. A predictor
-// failure aborts the calibration. The replay itself never reads a lock, so
+// gathers the input of the controller exactly as a selection would. A unit
+// whose clone or index fails is returned marked Failed, not dropped: its
+// outcome is unknown, and the controller counts it as a miss at every lambda.
+// skip is non-empty when the engine stopped before L1, which mirrors a
+// production abstention before the deterministic layer: nothing is known about
+// the commit, the unit is dropped and counted, and the sample only shrinks. A
+// predictor failure aborts the calibration. The replay itself never reads a lock, so
 // one committed in the replayed revision cannot change the decision.
 func (r *calibrationReplay) unit(ctx context.Context, u labels.Unit) (cu control.CalUnit, skip string, err error) {
 	rep, err := events.NewReplay(ctx, r.repoDir, u.ParentSHA)
@@ -528,8 +530,8 @@ func (r *calibrationReplay) unit(ctx context.Context, u labels.Unit) (cu control
 		if ctx.Err() != nil {
 			return cu, "", ctx.Err()
 		}
-		r.logf("%s: %v", u.ID, err)
-		return cu, reasonReplayFailed, nil
+		r.logf("%s: %v: counted as a miss", u.ID, err)
+		return failedUnit(u), "", nil
 	}
 	defer func() { err = errors.Join(err, rep.Close()) }()
 	m, err := index.Build(ctx, rep.Dir(), r.cfg, index.Options{})
@@ -537,8 +539,8 @@ func (r *calibrationReplay) unit(ctx context.Context, u labels.Unit) (cu control
 		if ctx.Err() != nil {
 			return cu, "", ctx.Err()
 		}
-		r.logf("%s: index at the parent: %v", u.ID, err)
-		return cu, reasonIndexFailed, nil
+		r.logf("%s: index at the parent: %v: counted as a miss", u.ID, err)
+		return failedUnit(u), "", nil
 	}
 	if err := index.Publish(rep.Dir(), m); err != nil {
 		return cu, "", fmt.Errorf("calibrate: %s: %w", u.ID, err)
@@ -563,6 +565,12 @@ func (r *calibrationReplay) unit(ctx context.Context, u labels.Unit) (cu control
 	in := engine.ControllerInput(r.cfg, m, d.L1, cands, 0, r.testMS, control.DriftStatus{})
 	in.FullReason, in.TriggersFull = d.L1.FullReason, d.Change.TriggersFull
 	return control.CalUnit{ID: u.ID, Failing: u.Failing, Input: in}, "", nil
+}
+
+// failedUnit is a calibration unit whose replay failed: it keeps its ID and
+// regressions and carries no input, because none was learned.
+func failedUnit(u labels.Unit) control.CalUnit {
+	return control.CalUnit{ID: u.ID, Failing: u.Failing, Failed: true}
 }
 
 // insertCalibration records the lock in the calibrations table.
@@ -682,6 +690,7 @@ func writeCalibrateAccepted(w io.Writer, jsonMode bool, a calibrateAccepted) err
 	lw.printf("calibrate: wrote %s\n", a.Out)
 	lw.printf("lambda: %s\n", control.PValueKey(l.Lambda))
 	lw.printf("n_cal: %d\n", l.NCal)
+	lw.printf("replay_failures: %d\n", l.ReplayFailures)
 	lw.printf("empirical_miss_rate: %s\n", control.PValueKey(l.EmpiricalMissRate))
 	lw.printf("alpha: %s delta: %s unit: %s\n", control.PValueKey(l.Alpha), control.PValueKey(l.Delta), l.Unit)
 	lw.printf("split: %s split_at: %s\n", l.Split, orNone(l.SplitAt))

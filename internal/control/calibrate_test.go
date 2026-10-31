@@ -103,6 +103,58 @@ func TestUnitLossIsZeroWhenTheControllerAbstains(t *testing.T) {
 	}
 }
 
+// failedUnit is a commit whose replay failed. Its input is that of a regression
+// caught at every lambda of the grid, so only the failure itself can make its
+// loss 1: what production would have done is unknown.
+func failedUnit(id string) CalUnit {
+	u := calUnit(id, 0.9)
+	u.Failed = true
+	return u
+}
+
+func TestUnitLossIsOneForAUnitWhoseReplayFailed(t *testing.T) {
+	abstaining := failedUnit("ci:trigger")
+	abstaining.Input.TriggersFull = []string{"go.mod"} // an abstention would be loss 0 for a replayed unit
+	for name, u := range map[string]CalUnit{"caught at every lambda": failedUnit("ci:failed"), "with a full-suite trigger": abstaining} {
+		for _, lambda := range []float64{0.005, 0.1, 0.5} {
+			if got := UnitLoss(u, lambda); got != 1 {
+				t.Errorf("%s: UnitLoss(lambda %v) = %v, want 1: an unknown outcome is never a success", name, lambda, got)
+			}
+		}
+	}
+}
+
+// TestCalibrateCountsAFailedReplayAsAMiss: dropping the units whose replay
+// failed would remove would-be misses from both the numerator and the
+// denominator of the risk. They stay, as misses, and the lock counts them.
+func TestCalibrateCountsAFailedReplayAsAMiss(t *testing.T) {
+	p := calibrationParams(t)
+	p.Alpha = 0.05
+	clean := calUnits(400, 0, 0.9, 0)
+	if got := Calibrate(clean, p); got.LTT.Refused || got.Lock.EmpiricalMissRate != 0 || got.Lock.ReplayFailures != 0 {
+		t.Fatalf("fixture: the 400 clean units give refused %v miss rate %v failures %d, want a loss-free lock", got.LTT.Refused, got.Lock.EmpiricalMissRate, got.Lock.ReplayFailures)
+	}
+
+	units := append(slices.Clone(clean), failedUnit("ci:f1"), failedUnit("ci:f2"), failedUnit("ci:f3"))
+	got := Calibrate(units, p)
+
+	if got.LTT.Refused {
+		t.Fatalf("refused: %+v", got.LTT)
+	}
+	if got.Lock.NCal != 403 {
+		t.Errorf("NCal = %d, want 403: the units whose replay failed are part of the sample", got.Lock.NCal)
+	}
+	if want := 3.0 / 403.0; got.Lock.EmpiricalMissRate != want {
+		t.Errorf("EmpiricalMissRate = %v, want %v: three misses in 403", got.Lock.EmpiricalMissRate, want)
+	}
+	if got.Lock.ReplayFailures != 3 {
+		t.Errorf("ReplayFailures = %d, want 3", got.Lock.ReplayFailures)
+	}
+	if !slices.Contains(got.Lock.CalibrationIDs, "ci:f2") {
+		t.Errorf("CalibrationIDs omits a unit whose replay failed: %v", got.Lock.CalibrationIDs)
+	}
+}
+
 func TestUnitLossDoesNotChangeTheUnit(t *testing.T) {
 	u := calUnit("ci:a", 0.4)
 	u.Input.Lambda = 0.123

@@ -664,7 +664,7 @@ func TestSplitUnitsOfNothingIsNothing(t *testing.T) {
 func TestCalibrateAcceptedOutput(t *testing.T) {
 	lock := control.Lock{
 		Version: 1, CreatedAt: "2026-10-14T18:22:04Z", Alpha: 0.01, Delta: 0.05, Unit: "commit", Lambda: 0.035, Predictor: "static",
-		ModelVersion: "p0", RubricVersion: "none", FeatureVersion: "f", NCal: 300, EmpiricalMissRate: 0.0033, Split: "temporal", SplitAt: "2026-06-01",
+		ModelVersion: "p0", RubricVersion: "none", FeatureVersion: "f", NCal: 300, ReplayFailures: 2, EmpiricalMissRate: 0.0033, Split: "temporal", SplitAt: "2026-06-01",
 		Grid: []float64{0.035}, PValues: map[string]float64{"0.035": 0.01}, CalibrationIDs: []string{"ci:a"},
 	}
 	out := calibrateAccepted{Out: "hazard.lock", Lock: lock, Excluded: map[string]int{"in_training": 2}}
@@ -673,7 +673,7 @@ func TestCalibrateAcceptedOutput(t *testing.T) {
 	if err := writeCalibrateAccepted(&text, false, out); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"calibrate: wrote hazard.lock", "lambda: 0.035", "n_cal: 300", "empirical_miss_rate: 0.0033", "in_training=2", "exchangeable", "temporal backtest"} {
+	for _, want := range []string{"calibrate: wrote hazard.lock", "lambda: 0.035", "n_cal: 300", "replay_failures: 2", "empirical_miss_rate: 0.0033", "in_training=2", "exchangeable", "temporal backtest"} {
 		if !strings.Contains(text.String(), want) {
 			t.Errorf("text output omits %q:\n%s", want, text.String())
 		}
@@ -694,6 +694,56 @@ func TestCalibrateAcceptedOutput(t *testing.T) {
 	}
 	if got.Refused || got.Out != "hazard.lock" || got.Lock.Lambda != 0.035 || got.Lock.NCal != 300 || got.Excluded["in_training"] != 2 || !strings.Contains(got.Note, "exchangeable") {
 		t.Errorf("json output = %+v", got)
+	}
+}
+
+// TestCalibrationReplayKeepsAUnitWhoseReplayFailsAsAMiss: a unit that cannot
+// be replayed has an unknown outcome. Dropping it would take a would-be miss
+// out of the sample, so it stays, marked failed, and the controller counts it as
+// a miss at every lambda.
+func TestCalibrationReplayKeepsAUnitWhoseReplayFailsAsAMiss(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "repo")
+	at := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	writeTrainFiles(t, dir, map[string]string{
+		".gitignore": ".hazard/\n",
+		"go.mod":     "this is not a go.mod\n", // the parent does not build an index
+		"a/a.go":     "package a\n\nfunc A() int { return 1 }\n",
+	})
+	trainGit(t, dir, at, "init", "-q", "-b", "main")
+	trainGit(t, dir, at, "add", "-A")
+	trainGit(t, dir, at, "commit", "-q", "-m", "parent")
+	parent := trainGit(t, dir, at, "rev-parse", "HEAD")
+	writeTrainFiles(t, dir, map[string]string{"go.mod": "module example.com/m\n\ngo 1.21\n", "a/a.go": "package a\n\nfunc A() int { return 2 }\n"})
+	trainGit(t, dir, at, "add", "-A")
+	trainGit(t, dir, at, "commit", "-q", "-m", "child")
+	child := trainGit(t, dir, at, "rev-parse", "HEAD")
+
+	cfg := config.Defaults()
+	cfg.Languages.Python.Enabled = false
+	r := &calibrationReplay{repoDir: dir, cfg: cfg, lockPath: filepath.Join(t.TempDir(), "absent.lock")}
+
+	for _, tc := range []struct{ name, parent string }{
+		{"the parent cannot be checked out", strings.Repeat("0", 40)},
+		{"the index cannot be built at the parent", parent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := labels.Unit{ID: "ci:" + child, SHA: child, ParentSHA: tc.parent, Failing: []string{"go:example.com/m/a:TestA"}}
+
+			cu, skip, err := r.unit(context.Background(), u)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			if skip != "" {
+				t.Fatalf("skip = %q: a unit whose replay failed must stay in the sample, not be dropped", skip)
+			}
+			if !cu.Failed || cu.ID != u.ID || !reflect.DeepEqual(cu.Failing, u.Failing) {
+				t.Errorf("unit = %+v, want it kept as a failed unit with its ID and regressions", cu)
+			}
+			if got := control.UnitLoss(cu, 0.5); got != 1 {
+				t.Errorf("UnitLoss = %v, want 1", got)
+			}
+		})
 	}
 }
 
